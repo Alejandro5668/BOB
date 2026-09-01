@@ -1,0 +1,258 @@
+# BOB — Team Collaboration Guide
+
+This file applies regardless of which subfolder you're working in. It
+covers how collaborators (human and AI sessions) work together without
+stepping on each other's work. Stack-specific rules belong in a nested
+`<subdir>/CLAUDE.md` instead of here.
+
+> How any task gets routed → `docs/architecture.md` §4 (the decision
+> ladder). Consult it before starting any requested task: it decides
+> whether the work goes direct, delegated, or through SDD, and whether it
+> genuinely needs an issue/board card — don't infer that from the board
+> rule below alone, it's coarser and misses that nuance (a 1-3 file change
+> with one reasonable approach and low risk goes direct, no issue, no
+> card). Worktree activation (below) is independent of that ladder — it
+> applies whenever a second concurrent session exists, regardless of task
+> size.
+
+---
+
+## Decision persistence rule (mandatory)
+
+Any AI session's memory/continuity tooling is typically **local to each
+machine** — it does not sync between collaborators. If one person makes an
+architecture decision and it only lives in that local memory, nobody else
+sees it and will build against a stale assumption.
+
+**Rule:** any of the following must be written to a git-tracked file in the
+same response/session that decides it — never left only in local
+session memory:
+
+- Architecture or design decisions
+- API contract decisions (endpoint shape, request/response payload,
+  roles/permissions)
+- Workflow or convention changes
+- Anything another collaborator needs to know to avoid duplicate or
+  conflicting work
+
+**Where to write it:**
+
+| Decision scope | File |
+|---|---|
+| Tied to one feature/module being built via SDD | The change's spec/design artifacts (e.g. `openspec/changes/<change>/proposal.md`, `spec.md`, `design.md`) |
+| Lasting convention, not tied to one feature | The relevant `CLAUDE.md` — this file, or a nested stack-specific one |
+
+### One SDD change spanning multiple parallel PRs
+
+When one SDD change fans out into several PRs in flight at once, only
+**one** copy of the spec artifacts is canonical, and it must reach the
+default branch through the **first** of those PRs to merge — never
+duplicated or re-authored independently in each branch. Two branches that
+each carry their own divergent copy of the same change's spec files will
+conflict on merge even when the source code doesn't.
+
+- Before starting the second (or third) PR of a fanned-out change, check
+  whether the first PR already merged its spec artifacts. If yes, branch
+  from that — don't re-copy or re-draft the spec.
+- If the first PR hasn't merged yet, reference the still-open PR's spec
+  instead of duplicating it.
+- Whoever merges second rebases onto whatever landed first and drops their
+  own duplicate spec files in favor of the one now on the default branch.
+
+---
+
+## Parallel work coordination
+
+- <PLACEHOLDER: describe your project's module boundaries once they exist,
+  e.g. "backend and frontend are independent projects on purpose (own
+  lockfiles, own dependency manager) so each person can work without
+  touching the other's files.">
+- When a feature needs multiple layers/services, the API contract (schema,
+  routes, roles) must be settled in an SDD spec/design **before** everyone
+  starts implementing in parallel — not discovered mid-implementation.
+- <PLACEHOLDER: if you regenerate a client/type layer from a schema, note
+  the command and when it must be re-run, e.g. "after any backend
+  schema/route change, regenerate the frontend TS client
+  (`npm run generate:types`) in the same PR.">
+- **No GitHub Projects board in use for this repo.** Skip the board-check
+  and board-ownership rules below entirely until one is adopted.
+- `.claude/hooks/board-context.mjs` and `.claude/hooks/skill-reminder.mjs`
+  are wired but board-context has nothing to fetch without a board —
+  see `TOOLS.md` / `docs/architecture.md`.
+- `.claude/hooks/skill-reminder.mjs` reminds which project-specific
+  skills/conventions apply the first time in a session that a file in a
+  configured category is edited. Configure its `CATEGORIES` block per
+  stack — ships empty.
+
+---
+
+## Concurrent agent sessions in the same local clone
+
+Two collaborators' agent sessions can end up running against the exact
+same clone (one machine, one folder) at the same time — this is not an
+edge case, it happens whenever one person kicks off a second session while
+the first is still working. `HEAD` and the working tree are one per
+folder: if either session runs `git checkout`/`switch`, it moves the
+other's checkout out from under it.
+
+### Rule: one git worktree per active session
+
+The moment a second session is going to make edits or run
+git/branch-affecting commands in this repo while another session is also
+active, each session works from **its own git worktree**.
+
+```bash
+git worktree add ../<repo>-<short-slug> <module>/prN-description
+git worktree list
+git worktree remove ../<repo>-<short-slug>
+```
+
+- Worktrees live as **siblings** of the main clone, never nested inside it.
+- Branch naming stays `<module>/prN-description`; the worktree directory
+  name is just a readable slug for that branch.
+- The main clone stays on the default branch when idle — don't leave it
+  parked on a feature branch between sessions.
+
+`.claude/hooks/worktree-guard.mjs` automates detecting this and blocking
+edits in the shared clone once a second session is live — see
+`docs/architecture.md` §2 for exactly how.
+
+### Checking for a concurrent session is the agent's job, not the human's
+
+Don't ask "is another session running?" as the first move — check before
+editing or running any git/branch-affecting command in the main clone (a
+session already working from its own worktree doesn't need to re-check).
+Signals to combine (none alone is proof):
+
+- `git worktree list` — other worktrees besides the main clone.
+- `git status` — uncommitted changes this session didn't make, especially
+  with recent mtimes.
+- Streamlit dev server on port 8501 (`streamlit run app.py`, the default
+  Streamlit port).
+- `.git/index.lock` existing — a git operation is in progress elsewhere.
+
+If signals point to concurrent activity, set up a worktree before
+continuing. Only ask the human when signals are genuinely ambiguous even
+after checking.
+
+### What a new worktree does NOT get for free
+
+A worktree shares git history/objects with the main clone, but not
+uncommitted or gitignored local state — env files, dependency installs.
+`scripts/setup-worktree.sh` automates seeding these; customize its
+placeholder sections for your stack.
+
+**Dev-server port convention:** run with `streamlit run app.py`; the main
+clone stays on the default port 8501. Each additional worktree runs its own
+instance on the next free port (`streamlit run app.py --server.port 8502`,
+`8503`, ...).
+
+**Shared local services (e.g. a dev database):** <PLACEHOLDER: if your
+stack has a service that only one worktree should run (a fixed host port,
+a shared container), describe the convention here — which worktree runs
+it, how the others point at it, and how to avoid two worktrees running
+conflicting migrations against it concurrently.>
+
+### When a worktree is overkill
+
+A single session working alone in this clone doesn't need a worktree —
+this only kicks in once a *second* session is going to be concurrently
+active here. A session that's only answering questions or reading code (no
+edits, no branch switches) doesn't need one either.
+
+---
+
+## Branching and delivery
+
+- One branch per sub-issue/work unit: `<module>/prN-description`.
+- Merge to the default branch as soon as a PR's own checks are green.
+  Don't accumulate unmerged work on a long-lived branch.
+- **Rebase-before-merge for stacked/parallel PR chains.** A PR's own CI run
+  only proves it's green against the base it branched from — not against
+  the default branch plus whatever else just merged ahead of it. Run
+  `./scripts/check-branch-overlap.sh` before merging the 2nd+ PR of a batch
+  that shares scope with one that just merged; rebase onto the current tip
+  and wait for checks to go green on that rebased state.
+
+## Before every push (mandatory)
+
+Another collaborator's session may have pushed since your last pull.
+
+Run `./scripts/check-branch-overlap.sh` before pushing, every time:
+- No new commits on the remote default branch since your base → push
+  normally.
+- New commits but no file overlap → `git rebase origin/<default-branch> &&
+  git push`.
+- File overlap → STOP. Read both diffs in full before touching anything;
+  resolve the conflict deliberately during the rebase. Never force-push
+  over someone else's work.
+
+## Local pre-push checks
+
+Run `pytest` from the repo root before every push — it covers
+`transcribir.py` and `generar_descripcion.py` with mocked
+Whisper/Groq clients, no network calls, no `GROQ_API_KEY` required. No git
+hook wired yet; run it manually until one is added. No GitHub Actions CI
+configured for this repo yet.
+
+## Deploying after a merge
+
+<PLACEHOLDER: no deploy pipeline yet — describe it here once one exists
+(auto-deploy on push? manual script? which environments?).>
+
+## Commits and Pull Requests
+
+- Conventional commits (`feat`/`fix`/`docs`/`chore`/`refactor`/...), never
+  an AI-attribution trailer.
+- One commit per logical concern — don't bundle unrelated changes into one
+  commit just because they landed in the same session.
+- PR body template, in this order:
+  - `## Problem`: what was broken or missing, and why it matters.
+  - `## Solution`: what changed technically (the "how").
+  - `## Impact`: which endpoints/screens/contracts this touches; breaking
+    changes if any.
+  - `## Verification`: tests run, manual steps, screenshots if frontend.
+- Reference the sub-issue the PR closes (`Closes #N`), once a board is
+  adopted, so its `Status` advances automatically on merge.
+
+---
+
+## How to pick up a task (no board yet)
+
+Without a board, work is tracked by branch + PR directly. Which
+implementation route a task takes depends on its review tier (see below) —
+not every task needs the full SDD ramp.
+
+**Tier 1, or any Tier 2/3 task with a genuinely open design question or a
+cross-collaborator contract at stake:** full SDD cycle, mandatory.
+
+```
+1. Explore + propose (spec-driven-development tooling's explore/propose phase)
+2. Once the proposal is approved: spec + design + tasks
+3. Implementation on a branch named <module>/prN-description
+4. Validation against the spec/design/tasks contract
+5. Open PR
+6. Archive the SDD change
+```
+
+**Tier 3, and Tier 2 work whose scope is already well understood** (no open
+design question, nothing another collaborator needs to agree on first):
+skip the spec/design ceremony. Apply the decision ladder
+(`docs/architecture.md` §4 — direct inline for a mechanical 1-3 file
+change, one delegated writer for anything bigger), implement on a branch,
+and open the PR.
+
+### Review tiers
+
+| Tier | When | What it means |
+|---|---|---|
+| 1 | Auth, access control, tenant isolation, payments/money, or the contract of an endpoint already in production | Fresh-context review before merge — never the same session that wrote the change |
+| 2 | Additive infra, no behavior change to existing endpoints | Full-diff self-review before opening the PR |
+| 3 | Pure UI, docs, config | Tests + your own verification pass; no separate reviewer |
+
+Trivial/docs-only changes need no formal review step at all — don't invent
+ceremony where the risk doesn't justify it.
+
+<PLACEHOLDER: fill in a table of this project's actual Tier-1 modules once
+they exist, e.g. "payments", "auth", "multi-tenant data isolation" —
+whatever your irreversible/high-blast-radius surfaces turn out to be.>
