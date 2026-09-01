@@ -1,0 +1,31 @@
+schema: spec-driven
+
+context: |
+  Tech stack: not yet chosen (repo BOB is currently empty except the AJ architecture kit)
+  Architecture: TBD per change; first change (asistente-voz-fase1) targets Python + Streamlit + faster-whisper + Groq API
+  Testing: no test runner configured yet
+  Style: no linter/formatter configured yet
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing code patterns
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
