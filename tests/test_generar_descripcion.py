@@ -5,6 +5,9 @@ import pytest
 
 from generar_descripcion import (
     MODELO,
+    PLANTILLA_USUARIO,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_CON_CONTEXTO,
     ErrorConfiguracion,
     generar_descripcion,
 )
@@ -96,3 +99,93 @@ def test_generar_descripcion_with_injected_client(monkeypatch):
     # Transcript is sent verbatim, bounded by --- delimiters.
     assert transcripcion in user_msg
     assert "---" in user_msg
+
+
+def test_no_context_provider_sends_byte_identical_fase1_prompt(monkeypatch):
+    """`proveedor_contexto` returning "" must be indistinguishable from Fase 1."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    cliente = FakeGroq()
+    transcripcion = "El analista describe un error al entrar al módulo de riesgos."
+
+    resultado = generar_descripcion(
+        transcripcion,
+        cliente=cliente,
+        proveedor_contexto=lambda t: "",
+    )
+
+    assert resultado == "Descripción generada de prueba"
+    kwargs = cliente.chat.completions.calls[0]
+    system_msg = kwargs["messages"][0]["content"]
+    user_msg = kwargs["messages"][1]["content"]
+
+    assert system_msg == SYSTEM_PROMPT
+    assert user_msg == PLANTILLA_USUARIO.format(transcripcion=transcripcion)
+    assert "===" not in user_msg
+
+
+def test_context_provider_with_match_uses_system_prompt_con_contexto(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    cliente = FakeGroq()
+    transcripcion = "El analista describe un error al entrar al módulo de riesgos."
+    texto_contexto = "Documentación de referencia del módulo de riesgos."
+
+    resultado = generar_descripcion(
+        transcripcion,
+        cliente=cliente,
+        proveedor_contexto=lambda t: texto_contexto,
+    )
+
+    assert resultado == "Descripción generada de prueba"
+    kwargs = cliente.chat.completions.calls[0]
+    system_msg = kwargs["messages"][0]["content"]
+    user_msg = kwargs["messages"][1]["content"]
+
+    assert system_msg == SYSTEM_PROMPT_CON_CONTEXTO
+    assert system_msg.startswith(SYSTEM_PROMPT)
+    assert "PROHIBIDO presentar contenido del contexto" in system_msg
+
+    # Context block uses === delimiters (distinct from the --- transcript
+    # delimiters) and contains only the injected text, verbatim.
+    assert "===" in user_msg
+    assert texto_contexto in user_msg
+    assert transcripcion in user_msg
+    assert "---" in user_msg
+
+
+def test_context_provider_receives_the_transcript(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    cliente = FakeGroq()
+    transcripcion = "El analista describe un error al entrar al módulo de riesgos."
+    recibido = []
+
+    def proveedor_espia(texto):
+        recibido.append(texto)
+        return ""
+
+    generar_descripcion(transcripcion, cliente=cliente, proveedor_contexto=proveedor_espia)
+
+    assert recibido == [transcripcion]
+
+
+def test_default_context_provider_is_contexto_memoria_buscar_contexto(monkeypatch):
+    """When `proveedor_contexto` is None, it resolves lazily to
+    `contexto_memoria.buscar_contexto` — never raises, never touches
+    Groq's request shape when it returns no match."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("MEMORY_DIR", raising=False)
+
+    cliente = FakeGroq()
+    transcripcion = "texto que no coincide con ningún módulo conocido de memoria"
+
+    resultado = generar_descripcion(
+        transcripcion,
+        cliente=cliente,
+        proveedor_contexto=None,
+    )
+
+    assert resultado == "Descripción generada de prueba"
+    kwargs = cliente.chat.completions.calls[0]
+    assert kwargs["messages"][0]["content"] == SYSTEM_PROMPT

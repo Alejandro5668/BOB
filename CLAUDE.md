@@ -190,10 +190,12 @@ Run `./scripts/check-branch-overlap.sh` before pushing, every time:
 ## Local pre-push checks
 
 Run `pytest` from the repo root before every push — it covers
-`transcribir.py` and `generar_descripcion.py` with mocked
-Whisper/Groq clients, no network calls, no `GROQ_API_KEY` required. No git
-hook wired yet; run it manually until one is added. No GitHub Actions CI
-configured for this repo yet.
+`transcribir.py`, `generar_descripcion.py`, and `contexto_memoria.py`
+(Fase 2's read-only `memory/` module-context retrieval, see `README.md`
+for the `MEMORY_DIR` / `memory/` contract) with mocked/fake
+Whisper/Groq/context providers, no network calls, no `GROQ_API_KEY`
+required. No git hook wired yet; run it manually until one is added. No
+GitHub Actions CI configured for this repo yet.
 
 ## Deploying after a merge
 

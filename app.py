@@ -3,11 +3,17 @@
 Thin UI layer only — never calls Whisper or Groq directly. Delegates to
 `transcribir.py` and `generar_descripcion.py`, and maps their typed
 exceptions to `st.error` (no raw tracebacks, no key leakage).
+
+Fase 2: also calls `contexto_memoria.diagnosticar()` right before
+generation and renders any result via `st.info` — a non-blocking notice,
+never `st.error`, since generation proceeds with transcript-only
+submission regardless (see design.md "degrade notice" decision).
 """
 
 import streamlit as st
 from dotenv import load_dotenv
 
+from contexto_memoria import diagnosticar
 from generar_descripcion import (
     ErrorConfiguracion,
     ErrorGeneracion,
@@ -79,6 +85,9 @@ if transcripcion_vacia:
     st.warning("No hay transcripción todavía — grábala o súbela primero.")
 
 if st.button("Generar descripción", disabled=transcripcion_vacia):
+    aviso_memoria = diagnosticar()
+    if aviso_memoria:
+        st.info(aviso_memoria)
     try:
         with st.spinner("Generando descripción..."):
             st.session_state.descripcion = generar_descripcion(

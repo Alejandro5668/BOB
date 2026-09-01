@@ -5,14 +5,23 @@ is always constructor-injected (never built at import time) so unit tests
 run today with a fake client and the missing `GROQ_API_KEY` blocker never
 breaks import or testing. Never imports Streamlit (see spec "Module
 Testability").
+
+Fase 2 adds an optional `proveedor_contexto` seam mirroring `cliente`:
+when a module clears the retrieval threshold (see `contexto_memoria.py`),
+its `_modulo.md` content is injected as a distinct, delimited context
+block using `SYSTEM_PROMPT_CON_CONTEXTO`. When no context is returned,
+the Groq request stays byte-identical to Fase 1 (`SYSTEM_PROMPT` +
+`PLANTILLA_USUARIO`).
 """
 
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 MODELO = "llama-3.3-70b-versatile"
+
+ProveedorContexto = Callable[[str], str]
 
 SYSTEM_PROMPT = """Eres un asistente que redacta descripciones de incidencias para tickets de Jira, en español.
 
@@ -30,6 +39,25 @@ PLANTILLA_USUARIO = """Transcripción del analista:
 {transcripcion}
 ---
 Redacta la descripción."""
+
+REGLAS_CONTEXTO = """Reglas adicionales para el bloque "Contexto de módulo":
+8. El contexto es documentación interna de referencia. Úsalo SOLO para nombrar correctamente el módulo afectado y su comportamiento documentado.
+9. La transcripción es la única fuente de los hechos del incidente. PROHIBIDO presentar contenido del contexto como algo que ocurrió, se observó o se hizo.
+10. PROHIBIDO afirmar o insinuar cualquier cosa sobre el módulo que no aparezca literalmente en el bloque de contexto.
+11. Si el contexto no concuerda con lo narrado en la transcripción, IGNÓRALO por completo y redacta únicamente desde la transcripción.
+12. PROHIBIDO enumerar funcionalidades del módulo, copiar frases del contexto o mencionar que existe un contexto."""
+
+SYSTEM_PROMPT_CON_CONTEXTO = SYSTEM_PROMPT + "\n\n" + REGLAS_CONTEXTO
+
+PLANTILLA_USUARIO_CON_CONTEXTO = """Contexto de módulo (documentación interna, solo referencia):
+===
+{contexto}
+===
+Transcripción del analista:
+---
+{transcripcion}
+---
+Redacta la descripción. Los hechos salen solo de la transcripción; el contexto solo sirve para nombrar el módulo y su comportamiento documentado."""
 
 
 class ErrorConfiguracion(RuntimeError):
@@ -61,24 +89,45 @@ def _crear_cliente():
 def generar_descripcion(
     transcripcion: str,
     *,
+    proveedor_contexto: Optional[ProveedorContexto] = None,
     cliente=None,
     modelo: str = MODELO,
 ) -> str:
-    """Send only `transcripcion` to Groq and return the generated prose.
+    """Send `transcripcion` (plus retrieved module context, if any) to Groq.
 
     `cliente` is injected for testing; when None, `_crear_cliente()` is
-    called, which fails fast on a missing/blank GROQ_API_KEY.
+    called, which fails fast on a missing/blank GROQ_API_KEY — before any
+    context retrieval or network call.
+
+    `proveedor_contexto` is injected for testing; when None, it resolves
+    lazily to `contexto_memoria.buscar_contexto` (a total function that
+    never raises and returns `""` on no-match/missing/unreadable memory).
+    When it returns a non-empty string, the Groq request uses
+    `SYSTEM_PROMPT_CON_CONTEXTO` and the context-block user template.
+    Otherwise the request stays byte-identical to Fase 1.
     """
     if cliente is None:
         cliente = _crear_cliente()
 
-    mensaje_usuario = PLANTILLA_USUARIO.format(transcripcion=transcripcion)
+    if proveedor_contexto is None:
+        from contexto_memoria import buscar_contexto as proveedor_contexto
+
+    contexto = proveedor_contexto(transcripcion)
+
+    if contexto:
+        system_prompt = SYSTEM_PROMPT_CON_CONTEXTO
+        mensaje_usuario = PLANTILLA_USUARIO_CON_CONTEXTO.format(
+            contexto=contexto, transcripcion=transcripcion
+        )
+    else:
+        system_prompt = SYSTEM_PROMPT
+        mensaje_usuario = PLANTILLA_USUARIO.format(transcripcion=transcripcion)
 
     try:
         respuesta = cliente.chat.completions.create(
             model=modelo,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": mensaje_usuario},
             ],
             temperature=0.2,
