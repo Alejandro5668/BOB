@@ -1,0 +1,14 @@
+change: asistente-voz-fase4
+artifact_store: hybrid
+delivery_strategy: single-pr
+review_budget_lines: 400
+phases:
+  explore: done
+  proposal: done
+  spec: done (no delta - infrastructure change)
+  design: done
+  tasks: done (~120-150 lines, under 400 budget, no size exception needed)
+  apply: partial (build+healthy+down smoke test done by orchestrator directly; .env.example BOB_HOST_PORT line blocked by permission guardrail; UI-interactive tasks 3.4-3.7 deferred, need real audio/manual browser test)
+  verify: done (pass with warnings, 0 critical)
+  archive: pending
+next_recommended: sdd-archive
