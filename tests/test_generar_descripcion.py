@@ -226,6 +226,7 @@ def test_system_prompts_embed_plantilla_ticket_jira_verbatim(prompt):
 def test_template_headings_appear_in_fixed_order(prompt):
     encabezados = [
         "## Módulo afectado",
+        "## Contexto del módulo",
         "## Qué pasó",
         "## Pasos para reproducir",
         "## Resultado esperado vs. obtenido",
@@ -256,9 +257,36 @@ def test_rule_12_no_fence_no_preamble_wording():
     assert "SIN envolverla en un bloque de código" in GENERADOR_DESCRIPCION_TICKET
 
 
-def test_context_rules_13_to_18_only_in_con_contexto_prompt():
+def test_context_rules_13_to_19_only_in_con_contexto_prompt():
     assert "Módulo > Submódulo" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
     assert "Módulo > Submódulo" not in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rule_15_allows_module_functionality_only_in_contexto_del_modulo_section():
+    """Regression: rule 18 originally banned ANY functional enumeration from
+    context, making descriptions too terse when good documentation existed
+    (real example: cfg_configuracion/lxm_modificar.md — a labels/lists
+    management screen — was correctly retrieved but its content was
+    discarded entirely). Rule 15 now channels that into one dedicated
+    section instead."""
+    assert "## Contexto del módulo" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "ÚNICA sección donde podés describir funcionalidad" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "nunca mezcles el comportamiento documentado con los hechos del incidente" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+
+
+def test_rule_16_context_facts_confined_to_contexto_del_modulo_section():
+    assert (
+        "eso solo puede ir en `## Contexto del módulo`, nunca en `## Qué pasó`"
+        in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    )
+
+
+def test_rule_19_still_bans_literal_copying_and_context_leaking_into_steps():
+    assert "parafraseá siempre" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert (
+        "usar el contexto para inventar pasos de reproducción o un resultado esperado"
+        in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    )
 
 
 # --- Sub-module naming via synthetic context (never touches memory/ fixtures) --
