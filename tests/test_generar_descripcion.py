@@ -113,7 +113,7 @@ def test_generar_descripcion_with_injected_client(monkeypatch):
 
     kwargs = cliente.messages.calls[0]
     assert kwargs["model"] == MODELO
-    assert kwargs["temperature"] == 0.2
+    assert "temperature" not in kwargs
     assert kwargs["max_tokens"] == 1024
 
     system_msg = kwargs["system"]

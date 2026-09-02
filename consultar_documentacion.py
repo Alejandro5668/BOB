@@ -81,7 +81,6 @@ def responder_consulta(
             model=modelo,
             system=RESPONDEDOR_CONSULTA_DOCUMENTACION,
             messages=[{"role": "user", "content": mensaje_usuario}],
-            temperature=0.2,
             max_tokens=1024,
         )
     except Exception as exc:

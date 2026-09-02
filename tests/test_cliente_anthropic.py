@@ -192,7 +192,7 @@ def test_pedir_json_parses_prefilled_response():
     assert kwargs["messages"][-1] == {"role": "assistant", "content": "{"}
     assert kwargs["messages"][0] == {"role": "user", "content": "usuario"}
     assert kwargs["system"] == "sistema"
-    assert kwargs["temperature"] == 0.0
+    assert "temperature" not in kwargs
 
 
 def test_pedir_json_tolerates_trailing_prose_after_the_object():
