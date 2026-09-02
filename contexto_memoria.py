@@ -14,6 +14,7 @@ writes, creates, or deletes anything under `MEMORY_DIR`: only `is_dir`,
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -21,6 +22,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 # --- Pinned constants (see design.md "Pinned Values") ------------------
 
@@ -326,5 +329,9 @@ def buscar_contexto(transcripcion: str, *, directorio: Optional[str] = None) -> 
             return ""
 
         return _ensamblar_contexto(bloques, PRESUPUESTO_CARACTERES)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "buscar_contexto degradó a sin-contexto (directorio=%s): %s: %s",
+            directorio, type(exc).__name__, exc,
+        )
         return ""

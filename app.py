@@ -13,6 +13,10 @@ submission regardless (see design.md "degrade notice" decision).
 import streamlit as st
 from dotenv import load_dotenv
 
+from logging_config import configurar_logging
+
+configurar_logging()
+
 from contexto_memoria import diagnosticar
 from generar_descripcion import (
     ErrorConfiguracion,

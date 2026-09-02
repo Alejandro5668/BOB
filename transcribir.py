@@ -9,9 +9,12 @@ Testability").
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import tempfile
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 ProgresoCallback = Callable[[float], None]
 
@@ -89,6 +92,7 @@ def transcribir_archivo(
     except ErrorDependenciaAudio:
         raise
     except Exception as exc:
+        logger.error("Fallo transcribiendo audio (ruta=%s): %s: %s", ruta, type(exc).__name__, exc)
         raise ErrorTranscripcion(
             f"No se pudo transcribir el audio: {exc}"
         ) from exc

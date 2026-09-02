@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Same constructor call transcribir.py::_cargar_modelo() makes at runtime.
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
 
-COPY app.py transcribir.py generar_descripcion.py contexto_memoria.py prompts.py ./
+COPY app.py transcribir.py generar_descripcion.py contexto_memoria.py prompts.py logging_config.py ./
 COPY memory/ ./memory/
 
 EXPOSE 8501

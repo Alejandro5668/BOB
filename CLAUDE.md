@@ -105,6 +105,23 @@ don't pre-build that structure for one feature's prompts.
 
 ---
 
+## Logging convention
+
+`logging_config.py` wires stdlib `logging` once at process start (called
+from `app.py`, the only entrypoint): console output (captured by
+`docker compose logs`) plus a rotating file at `logs/app.log`
+(bind-mounted in `docker-compose.yml` so it survives container
+recreation; gitignored).
+
+Every module that can fail (Groq calls, transcription, memory retrieval)
+logs the **real** exception (`type(exc).__name__`, message) at the point
+of failure, before wrapping it in the short, friendly Spanish message the
+UI shows. Never log the `GROQ_API_KEY` value or full audio bytes. When a
+user hits a generic UI error, check `logs/app.log` (or `docker compose
+logs`) for the actual cause before guessing.
+
+---
+
 ## Concurrent agent sessions in the same local clone
 
 Two collaborators' agent sessions can end up running against the exact

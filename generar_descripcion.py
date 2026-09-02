@@ -25,6 +25,7 @@ never surface as a fake API error.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -36,6 +37,8 @@ from prompts import (
     GENERADOR_DESCRIPCION_TICKET,
     GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO,
 )
+
+logger = logging.getLogger(__name__)
 
 MODELO = "llama-3.3-70b-versatile"
 
@@ -151,6 +154,7 @@ def _crear_cliente():
     """
     clave = os.environ.get("GROQ_API_KEY", "").strip()
     if not clave:
+        logger.warning("GROQ_API_KEY ausente o vacía al intentar generar una descripción.")
         raise ErrorConfiguracion(
             "GROQ_API_KEY no está configurada. Define la variable de entorno "
             "(ver .env.example) antes de generar una descripción."
@@ -324,9 +328,13 @@ def generar_descripcion(
             max_tokens=1024,
         )
     except Exception as exc:
+        logger.error(
+            "Fallo en la llamada a Groq (modelo=%s): %s: %s",
+            modelo, type(exc).__name__, exc,
+        )
         raise ErrorGeneracion(
             "No se pudo generar la descripción (fallo de autenticación o de "
-            "la API de Groq)."
+            "la API de Groq). Ver logs/app.log para el detalle técnico."
         ) from exc
 
     return postprocesar_descripcion(respuesta.choices[0].message.content)
