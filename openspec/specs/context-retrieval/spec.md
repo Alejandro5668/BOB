@@ -6,9 +6,9 @@ Locates and scores Kawak modules documented under `memory/` against the approved
 
 ## Requirements
 
-### Requirement: Schema-Free Discovery and Groq-Assisted Selection
+### Requirement: Schema-Free Discovery and Haiku-Assisted Selection
 
-The system MUST discover every `.md` file anywhere under `MEMORY_DIR`, regardless of folder layout, and MUST NOT require any fixed index file or per-module naming convention. The system MUST send a lightweight preview listing of candidate documents to Groq and MUST select only paths Groq returned that were actually present in that listing, capped at a fixed maximum count.
+The system MUST discover every `.md` file anywhere under `MEMORY_DIR`, regardless of folder layout, and MUST NOT require any fixed index file or per-module naming convention. The system MUST send a lightweight preview listing of candidate documents to Claude Haiku 4.5 and MUST select only paths Haiku returned that were actually present in that listing, capped at a fixed maximum count.
 
 #### Scenario: Flat or nested corpus discovered without a fixed schema
 - GIVEN `MEMORY_DIR` contains `.md` files in an arbitrary folder layout with no index file
@@ -16,40 +16,35 @@ The system MUST discover every `.md` file anywhere under `MEMORY_DIR`, regardles
 - THEN every `.md` file MUST be found as a candidate regardless of its folder depth or naming convention
 
 #### Scenario: Model never invents a path
-- GIVEN Groq's selection response names a path not present in the listing
+- GIVEN Haiku's selection response names a path not present in the listing
 - WHEN the system reads that response
 - THEN the invented path MUST be discarded and MUST NOT appear in the final selection
 
-### Requirement: Enriched-or-Raw Context Block Assembly
+### Requirement: Raw Full-Document Context Block Assembly
 
-When assembling context for the final-selected documents, the system MUST use each document's enriched functional summary when one is available and MUST fall back to that document's verbatim raw content otherwise. The system MUST preserve selection order when building blocks and MUST still enforce the existing character budget and deterministic truncation across the assembled blocks.
+When assembling context for the final-selected documents, the system MUST use each document's verbatim raw content. No enriched or summarized intermediate form MUST be produced, consulted, or fallen back to at this stage. The system MUST preserve selection order when building blocks.
 
-#### Scenario: Enriched summary available
-- GIVEN a selected document has a valid enriched summary
+#### Scenario: Selected document injected as raw content
+- GIVEN a document was selected by Haiku
 - WHEN the context block for that document is assembled
-- THEN the block MUST contain the enriched summary, not the raw file content
+- THEN the block MUST contain that document's verbatim raw content, not a summary
 
-#### Scenario: Enrichment unavailable for a document
-- GIVEN a selected document's enrichment failed or was never produced
-- WHEN the context block for that document is assembled
-- THEN the block MUST contain that document's verbatim raw content
-
-#### Scenario: Budget still enforced over enriched blocks
-- GIVEN the concatenated enriched-or-raw blocks of the selected documents exceed the configured character budget
-- WHEN context is assembled
-- THEN the system MUST truncate deterministically to fit within budget, exactly as it does today for raw blocks
+#### Scenario: Selection order preserved across blocks
+- GIVEN two or more documents were selected
+- WHEN blocks are assembled
+- THEN blocks MUST appear in the same order as the original selection
 
 ### Requirement: Bounded Context Size
 
-The system MUST enforce a character/token budget across all injected module context and MUST truncate deterministically rather than exceed it.
+The system MUST enforce a 120,000-character budget (~30K tokens) across all injected raw document blocks and MUST truncate deterministically rather than exceed it.
 
-#### Scenario: Combined content exceeds budget
-- GIVEN the concatenated `_modulo.md` content of the top-N modules exceeds the configured budget
+#### Scenario: Combined raw content exceeds budget
+- GIVEN the concatenated raw content of the selected documents exceeds 120,000 characters
 - WHEN context is assembled
-- THEN the system MUST truncate deterministically to fit within budget
+- THEN the system MUST truncate deterministically to fit within the 120,000-character budget
 
-#### Scenario: Combined content within budget
-- GIVEN the concatenated content is within budget
+#### Scenario: Combined raw content within budget
+- GIVEN the concatenated raw content is within 120,000 characters
 - WHEN context is assembled
 - THEN the content MUST be included unmodified
 

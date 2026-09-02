@@ -43,7 +43,12 @@ from logging_config import configurar_logging
 
 configurar_logging()
 
-from consultar_documentacion import responder_consulta
+from consultar_documentacion import (
+    TIPO_PREGUNTA_ACLARATORIA,
+    TIPO_RESPUESTA,
+    TIPO_SIN_INFORMACION,
+    responder_consulta,
+)
 from contexto_memoria import diagnosticar, nombres_conocidos
 from generar_descripcion import (
     ErrorConfiguracion,
@@ -166,6 +171,8 @@ if "transcripcion" not in st.session_state:
     st.session_state.transcripcion = ""
 if "resultado" not in st.session_state:
     st.session_state.resultado = ""
+if "tipo_respuesta" not in st.session_state:
+    st.session_state.tipo_respuesta = TIPO_RESPUESTA
 if "ultimo_audio_id" not in st.session_state:
     st.session_state.ultimo_audio_id = None
 
@@ -241,10 +248,15 @@ if st.button(
                 st.session_state.resultado = generar_descripcion(
                     st.session_state.transcripcion
                 )
+                st.session_state.tipo_respuesta = TIPO_RESPUESTA
             else:
-                st.session_state.resultado = responder_consulta(
+                respuesta = responder_consulta(
                     st.session_state.transcripcion
                 )
+                # `.texto` is always the analyst-facing string, so the text
+                # area keeps holding a plain str exactly as before.
+                st.session_state.resultado = respuesta.texto
+                st.session_state.tipo_respuesta = respuesta.tipo
     except ErrorConfiguracion as exc:
         st.error(str(exc))
     except ErrorGeneracion as exc:
@@ -253,6 +265,15 @@ if st.button(
 if modo == MODO_TICKET:
     titulo_resultado = "Descripción para Jira"
     subtitulo_resultado = "El texto puede editarse antes de copiarlo al ticket."
+elif st.session_state.tipo_respuesta == TIPO_PREGUNTA_ACLARATORIA:
+    titulo_resultado = "BOB necesita una aclaración"
+    subtitulo_resultado = (
+        "La consulta admite más de una interpretación. Agregá el detalle que falta "
+        "a la transcripción y volvé a pulsar «Responder consulta»."
+    )
+elif st.session_state.tipo_respuesta == TIPO_SIN_INFORMACION:
+    titulo_resultado = "Sin información disponible"
+    subtitulo_resultado = "No se encontró documentación relacionada con esta consulta."
 else:
     titulo_resultado = "Respuesta"
     subtitulo_resultado = "Basada únicamente en la documentación disponible."
