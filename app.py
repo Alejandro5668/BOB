@@ -46,6 +46,7 @@ configurar_logging()
 from consultar_documentacion import (
     TIPO_PREGUNTA_ACLARATORIA,
     TIPO_RESPUESTA,
+    TIPO_SIN_INFORMACION,
     responder_consulta,
 )
 from contexto_memoria import diagnosticar, nombres_conocidos
@@ -270,6 +271,9 @@ elif st.session_state.tipo_respuesta == TIPO_PREGUNTA_ACLARATORIA:
         "La consulta admite más de una interpretación. Agregá el detalle que falta "
         "a la transcripción y volvé a pulsar «Responder consulta»."
     )
+elif st.session_state.tipo_respuesta == TIPO_SIN_INFORMACION:
+    titulo_resultado = "Sin información disponible"
+    subtitulo_resultado = "No se encontró documentación relacionada con esta consulta."
 else:
     titulo_resultado = "Respuesta"
     subtitulo_resultado = "Basada únicamente en la documentación disponible."
