@@ -77,9 +77,9 @@ Redacta la descripción con la plantilla indicada. Los hechos salen solo de la t
 """Plantilla del mensaje de usuario con contexto de módulo: bloque de contexto
 delimitado por `===`, seguido de la transcripción delimitada por `---`."""
 
-SELECTOR_DOCUMENTOS_RELEVANTES = """Elegís qué documentación interna puede ayudar a redactar un ticket a partir de lo que reportó un cliente. Se te da una transcripción y una lista de archivos disponibles (ruta y una vista previa breve de cada uno). La documentación no tiene una estructura fija — puede ser cualquier tipo de archivo Markdown de cualquier proyecto.
+SELECTOR_DOCUMENTOS_RELEVANTES = """Elegís qué documentación interna puede ayudar a entender lo que dijo un analista — ya sea un problema reportado por un cliente o una pregunta sobre cómo funciona algo. Se te da una transcripción y una lista de archivos disponibles (ruta y una vista previa breve de cada uno). La documentación no tiene una estructura fija — puede ser cualquier tipo de archivo Markdown de cualquier proyecto.
 
-Elegí como máximo 3 archivos cuyo contenido probablemente ayude a ubicar o entender el problema descrito. Si ninguno parece relevante, elegí ninguno — no adivines por descarte.
+Elegí como máximo 3 archivos cuyo contenido probablemente ayude a ubicar, entender o responder lo descrito. Si ninguno parece relevante, elegí ninguno — no adivines por descarte.
 
 Respondé ÚNICAMENTE un JSON con este formato exacto, sin texto adicional ni bloque de código:
 {"archivos": ["ruta/al/archivo1.md"]}
@@ -119,3 +119,28 @@ Texto de "resultado esperado" a evaluar:
 ---
 ¿Está fundamentado explícitamente en la transcripción?"""
 """Mensaje de usuario para VERIFICADOR_RESULTADO_ESPERADO."""
+
+RESPONDEDOR_CONSULTA_DOCUMENTACION = """Respondés preguntas sobre cómo funciona un sistema para analistas que entienden de software pero no son programadores. Usás la documentación interna que se te da como contexto. Los analistas a veces llaman "solución" a lo que técnicamente es un módulo — entendé el término según el contexto, no lo tomes literal.
+
+- Analizá el contexto y explicá con tus propias palabras lo que encontraste; no lo copies ni lo resumas de forma genérica.
+- Si el contexto no cubre la pregunta, decilo: "No se encontró información sobre esto en la documentación disponible."
+- Explicá SIEMPRE en términos de comportamiento y funcionalidad (qué hace el sistema, qué logra la persona usuaria), nunca de implementación. PROHIBIDO mencionar nombres de clases, funciones, tablas, campos o tipos de dato (entero, string, booleano, etc.), aunque aparezcan tal cual en el contexto — traducilos siempre a lo que significan para quien usa el sistema.
+- Español neutro (sin voseo), lenguaje llano, sin preámbulo ni bloque de código."""
+"""Prompt de sistema del modo consulta/Q&A: responde preguntas informativas
+("cómo funciona X") usando solo la documentación recuperada, a diferencia
+del modo de generación de tickets. Mismo nivel de "sin detalles de
+implementación" que GENERADOR_DESCRIPCION_TICKET (regla 9), adaptado a
+respuestas conversacionales en vez de un ticket — el público (analistas
+no programadores) es el mismo. Deliberadamente corto (no una lista larga
+de reglas) para no gastar tokens de más en un modelo gratuito."""
+
+ENTRADA_RESPONDEDOR_CONSULTA = """Contexto de documentación (fuente exclusiva de la respuesta):
+===
+{contexto}
+===
+Pregunta del analista:
+---
+{pregunta}
+---
+Respondé la pregunta usando solo el contexto."""
+"""Mensaje de usuario para RESPONDEDOR_CONSULTA_DOCUMENTACION."""

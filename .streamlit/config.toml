@@ -1,3 +1,8 @@
+[client]
+# Hides the "Deploy" button and the ⋮ menu in the top-right toolbar —
+# both are dev-time chrome, not meant for an internal tool's end users.
+toolbarMode = "minimal"
+
 [theme]
 base = "dark"
 primaryColor = "#C6F135"
