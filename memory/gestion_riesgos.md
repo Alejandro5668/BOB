@@ -1,4 +1,4 @@
-# Módulo: Gestión de Riesgos
+# Gestión de riesgos
 
 ## Propósito
 

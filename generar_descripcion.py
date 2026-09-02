@@ -16,19 +16,25 @@ returned, the Groq request stays byte-identical to the no-context path
 (`GENERADOR_DESCRIPCION_TICKET` + `ENTRADA_GENERADOR_DESCRIPCION`).
 
 Fase 3 adds a locked Markdown ticket template (see `prompts.py`) plus
-`postprocesar_descripcion`, a pure defense-in-depth pass over the raw
-model output that replaces a generic-filler "Resultado esperado vs.
-obtenido" body with a fixed notice. It runs OUTSIDE the try/except that
-maps Groq SDK failures to `ErrorGeneracion`, so a post-processor bug can
-never surface as a fake API error.
+`postprocesar_descripcion`, a defense-in-depth pass over the raw model
+output. It strips a whole-output code fence, and — when a "Resultado
+esperado vs. obtenido" section is present — asks Groq itself (a cheap
+auxiliary model, see `MODELO_AUXILIAR`) whether it's explicitly grounded
+in the transcript; an earlier fixed-phrase blocklist was replaced with
+this model judgment call at the user's explicit request, since a fixed
+list can never cover every way of phrasing an invented expectation. It
+runs OUTSIDE the try/except that maps Groq SDK failures to
+`ErrorGeneracion`, so a post-processor bug (including the verifier call
+itself failing) can never surface as a fake API error — on failure it
+defaults to keeping the model's original text.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
-import unicodedata
 from typing import Callable, Optional
 
 from prompts import (
@@ -41,6 +47,12 @@ from prompts import (
 logger = logging.getLogger(__name__)
 
 MODELO = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile decommissioned by Groq, Aug 2026
+# gpt-oss models reason internally before answering, and those reasoning
+# tokens count against max_tokens — a too-small cap cuts reasoning off
+# mid-thought, leaving an empty completion Groq's JSON mode then rejects
+# (400). reasoning_effort="low" keeps that cost small (see contexto_memoria.py
+# for the measured before/after).
+MODELO_AUXILIAR = "openai/gpt-oss-20b"  # cheaper/faster, used for the verifier call only
 
 ProveedorContexto = Callable[[str], str]
 
@@ -51,89 +63,6 @@ AVISO_RESULTADO_NO_CONFIABLE = (
     "Resultado esperado vs. obtenido: no se pudo determinar de forma confiable"
 )
 
-# Pinned blocklist (see design.md "Blocklist"): each entry is equally true
-# of any incident in any module — zero transcript-specific information.
-# Matching is always exact-fragment, never substring (see
-# `es_relleno_generico`), so bare entries like "correctamente" are safe.
-FRASES_GENERICAS = {
-    # expectativa con verbo
-    "funcionara correctamente",
-    "funcionase correctamente",
-    "funcione correctamente",
-    "funcionara con normalidad",
-    "funcionara de manera normal",
-    "funcionara normalmente",
-    "funcionara sin errores",
-    "funcionara sin problemas",
-    "funcionara sin inconvenientes",
-    "operara con normalidad",
-    "se comportara con normalidad",
-    "se comportara correctamente",
-    "cargara correctamente",
-    "se cargara correctamente",
-    "se mostrara correctamente",
-    "se guardara correctamente",
-    "se ejecutara correctamente",
-    "se completara correctamente",
-    "se procesara correctamente",
-    "respondiera correctamente",
-    "no presentara errores",
-    "no presentara ningun error",
-    "no fallara",
-    "no diera error",
-    "todo funcionara correctamente",
-    "todo funcionara bien",
-    "todo saliera bien",
-    # sin verbo
-    "un funcionamiento normal",
-    "un comportamiento normal",
-    "el funcionamiento esperado",
-    "el comportamiento esperado",
-    "el resultado esperado",
-    "sin errores",
-    "sin problemas",
-    "sin inconvenientes",
-    "sin fallos",
-    "sin novedad",
-    "de manera normal",
-    "de forma normal",
-    "con normalidad",
-    "correctamente",
-    # lado obtenido generico
-    "no funciono correctamente",
-    "no funciono como se esperaba",
-    "no funciono",
-    "no ocurrio lo esperado",
-    "no se obtuvo el resultado esperado",
-    "el resultado no fue el esperado",
-    "el resultado fue distinto al esperado",
-    "se obtuvo un resultado inesperado",
-    "un comportamiento inesperado",
-    "ocurrio un error",
-    "se presento un error",
-    "hubo un error",
-    "hubo un fallo",
-    "presento un error",
-    "arrojo un error",
-    "fallo",
-}
-
-# Scaffolding stripped iteratively from a fragment's start before matching
-# it against FRASES_GENERICAS (see design.md "Post-Processor Interface").
-_PATRONES_PREFIJO_RELLENO = (
-    re.compile(r"^(?:el |la )?(?:resultado )?(?:esperado|obtenido|se obtuvo)\s*[:\-]?\s*"),
-    re.compile(r"^(?:se )?(?:esperaba|espera|esperaria|deberia|debia)(?: de)?(?: que)?\s*"),
-    re.compile(
-        r"^(?:el sistema|la aplicacion|el aplicativo|el modulo|la pantalla|"
-        r"la funcionalidad|el proceso|la opcion|el reporte|el formulario|"
-        r"la pagina|la accion|todo|esto|ello)\s*"
-    ),
-    re.compile(r"^(?:que|y|pero|sin embargo|en su lugar|en cambio)\s*"),
-)
-
-_PATRON_CIFRA = re.compile(r"\d")
-_PATRON_COMILLAS = re.compile(r'"[^"]+"|«[^»]+»')
-_PATRON_MARCADOR_LISTA = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
 _PATRON_FENCE_INICIO = re.compile(r"^```[a-zA-Z]*$")
 _PATRON_FENCE_FIN = re.compile(r"^```$")
 
@@ -156,8 +85,8 @@ def _crear_cliente():
     if not clave:
         logger.warning("GROQ_API_KEY ausente o vacía al intentar generar una descripción.")
         raise ErrorConfiguracion(
-            "GROQ_API_KEY no está configurada. Define la variable de entorno "
-            "(ver .env.example) antes de generar una descripción."
+            "GROQ_API_KEY no está configurada. Debe definirse la variable de "
+            "entorno (ver .env.example) antes de generar una descripción."
         )
 
     from groq import Groq
@@ -165,74 +94,59 @@ def _crear_cliente():
     return Groq(api_key=clave)
 
 
-# --- Post-processor: pure str -> str, never raises -----------------------
+# --- Post-processor: fence-strip (pure) + Groq-judged grounding check ----
 
 
-def _normalizar_fragmento(fragmento: str) -> str:
-    """NFKD accent-strip, lowercase, drop bold/backtick markers, collapse
-    whitespace, strip trailing punctuation."""
-    forma = unicodedata.normalize("NFKD", fragmento)
-    sin_diacriticos = "".join(c for c in forma if not unicodedata.combining(c))
-    minusculas = sin_diacriticos.lower()
-    sin_marcas = re.sub(r"[*_`]", "", minusculas)
-    colapsado = re.sub(r"\s+", " ", sin_marcas).strip()
-    return colapsado.rstrip(".,;:!?")
+def _verificar_resultado_esperado(transcripcion: str, cuerpo: str, cliente) -> bool:
+    """Ask Groq whether `cuerpo` is explicitly grounded in `transcripcion`,
+    or an invented/generic expectation nobody stated.
+
+    Defaults to True (assume grounded, keep the text) on any failure — a
+    broken verifier must never silently erase real analyst-provided
+    content. Never raises.
+    """
+    from prompts import (
+        ENTRADA_VERIFICADOR_RESULTADO_ESPERADO,
+        VERIFICADOR_RESULTADO_ESPERADO,
+    )
+
+    try:
+        respuesta = cliente.chat.completions.create(
+            model=MODELO_AUXILIAR,
+            messages=[
+                {"role": "system", "content": VERIFICADOR_RESULTADO_ESPERADO},
+                {
+                    "role": "user",
+                    "content": ENTRADA_VERIFICADOR_RESULTADO_ESPERADO.format(
+                        transcripcion=transcripcion, cuerpo=cuerpo
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=150,
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
+        )
+        datos = json.loads(respuesta.choices[0].message.content)
+        return bool(datos.get("fundamentado", True))
+    except Exception as exc:
+        logger.warning(
+            "Verificación de 'Resultado esperado' falló, se conserva el texto: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return True
 
 
-def _quitar_relleno_estructural(fragmento: str) -> str:
-    """Strip scaffolding prefixes (result marker, expectation verb, generic
-    subject, connector) iteratively from the fragment start."""
-    cambiado = True
-    while cambiado:
-        cambiado = False
-        for patron in _PATRONES_PREFIJO_RELLENO:
-            nuevo = patron.sub("", fragmento)
-            if nuevo != fragmento:
-                fragmento = nuevo
-                cambiado = True
-    return fragmento
-
-
-def _fragmentos(cuerpo: str) -> list[str]:
-    """Split on newlines, then list markers, then `.`/`;` — drop empties."""
-    piezas: list[str] = []
-    for linea in cuerpo.splitlines():
-        sin_marcador = _PATRON_MARCADOR_LISTA.sub("", linea)
-        for parte in re.split(r"[.;]+", sin_marcador):
-            parte = parte.strip()
-            if parte:
-                piezas.append(parte)
-    return piezas
-
-
-def es_relleno_generico(cuerpo: str) -> bool:
-    """True only when every fragment of `cuerpo` normalizes to an exact
-    member of FRASES_GENERICAS after scaffolding is stripped. A digit, a
-    backtick, or a quoted run anywhere makes the body genuine (False) —
-    specificity always wins. Pure, total, exported for tests."""
-    if _PATRON_CIFRA.search(cuerpo) or "`" in cuerpo or _PATRON_COMILLAS.search(cuerpo):
-        return False
-
-    fragmentos = _fragmentos(cuerpo)
-    if not fragmentos:
-        return False
-
-    for fragmento in fragmentos:
-        residuo = _quitar_relleno_estructural(_normalizar_fragmento(fragmento))
-        if residuo and residuo not in FRASES_GENERICAS:
-            return False
-    return True
-
-
-def postprocesar_descripcion(texto: str) -> str:
+def postprocesar_descripcion(texto: str, transcripcion: str, cliente) -> str:
     """Best-effort defense-in-depth over the raw Groq response: strips a
-    whole-output code fence and replaces a generic-filler
-    `## Resultado esperado vs. obtenido` body with a fixed notice.
+    whole-output code fence, and — when a "Resultado esperado vs. obtenido"
+    section is present — asks Groq itself whether it's grounded in
+    `transcripcion`; if not, replaces it with a fixed notice.
 
-    Pure, total, never raises. Runs OUTSIDE the try/except that maps Groq
-    SDK failures to `ErrorGeneracion` — a bug here must never surface as a
-    fake API error. This is defense-in-depth only: the prompt template is
-    the primary control against invented expectations.
+    Never raises. Runs OUTSIDE the try/except that maps Groq SDK failures
+    to `ErrorGeneracion` for the main generation call — a bug here
+    (including the verifier call itself failing) degrades to keeping the
+    model's original text, never surfaces as a fake generation error.
     """
     if not isinstance(texto, str) or not texto.strip():
         return texto or ""
@@ -265,7 +179,7 @@ def postprocesar_descripcion(texto: str) -> str:
 
     cuerpo = "\n".join(lineas[indice_encabezado + 1 : fin_cuerpo]).strip()
 
-    if cuerpo and not es_relleno_generico(cuerpo):
+    if cuerpo and _verificar_resultado_esperado(transcripcion, cuerpo, cliente):
         return resultado
 
     reemplazo = [AVISO_RESULTADO_NO_CONFIABLE]
@@ -337,4 +251,4 @@ def generar_descripcion(
             "la API de Groq). Ver logs/app.log para el detalle técnico."
         ) from exc
 
-    return postprocesar_descripcion(respuesta.choices[0].message.content)
+    return postprocesar_descripcion(respuesta.choices[0].message.content, transcripcion, cliente)

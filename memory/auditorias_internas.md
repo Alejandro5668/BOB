@@ -1,4 +1,4 @@
-# Módulo: Auditorías Internas
+# Auditorías internas
 
 ## Propósito
 

@@ -1,5 +1,13 @@
 # Context Retrieval Specification
 
+> **STALE — out of sync with the implementation.** This spec still
+> describes the original fixed-schema (`MEMORY.md` index + lexical
+> scoring) design from Fase 2. It was replaced by a schema-free,
+> Groq-assisted selection design implemented directly (outside the SDD
+> cycle) — see `CLAUDE.md` "Context retrieval decision" and the real
+> `contexto_memoria.py` for current behavior. This file needs a proper
+> spec-delta pass to catch up; do not treat it as authoritative.
+
 ## Purpose
 
 Locates and scores Kawak modules documented under `memory/` against the approved transcript, and returns bounded, literal context for the top matching module(s) — or nothing when no module clears the confidence threshold. Retrieval is invisible to the analyst during normal operation and degrades gracefully when `memory/` is absent or unreadable.

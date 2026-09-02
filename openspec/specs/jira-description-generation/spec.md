@@ -1,5 +1,15 @@
 # Jira Description Generation Specification
 
+> **STALE — out of sync with the implementation.** The anti-hallucination
+> "Resultado esperado" defense-in-depth described here (if present) used a
+> fixed blocklist of generic phrases; it was replaced by a Groq-judged
+> grounding check implemented directly (outside the SDD cycle) — see
+> `CLAUDE.md` "Anti-hallucination check decision" and the real
+> `generar_descripcion.py` for current behavior. Transcription also moved
+> from local faster-whisper to the ElevenLabs API (see "Transcription
+> provider decision"). This file needs a proper spec-delta pass; do not
+> treat it as authoritative.
+
 ## Purpose
 
 Enables an analyst to convert an approved (possibly edited) transcript into an editable, Spanish-prose, plain-language Jira-ready description using the Groq LLM API, without retrieval context or sectioned ticket format (both deferred to later phases). Output must stay understandable to a non-technical reader — no invented implementation detail.

@@ -1,6 +1,7 @@
 """Unit tests for generar_descripcion.py — FakeGroq client, no network calls."""
 
 import ast
+import json
 from pathlib import Path
 
 import groq as groq_module
@@ -9,10 +10,9 @@ import pytest
 from generar_descripcion import (
     AVISO_RESULTADO_NO_CONFIABLE,
     ENCABEZADO_RESULTADO,
-    FRASES_GENERICAS,
     MODELO,
+    MODELO_AUXILIAR,
     ErrorConfiguracion,
-    es_relleno_generico,
     generar_descripcion,
     postprocesar_descripcion,
 )
@@ -41,23 +41,29 @@ class FakeResponse:
 
 
 class FakeCompletions:
-    def __init__(self, respuesta="Descripción generada de prueba"):
+    """Discriminates by `model`: MODELO_AUXILIAR calls are the verifier
+    (JSON {"fundamentado": ...}), anything else is the main generation call."""
+
+    def __init__(self, respuesta="Descripción generada de prueba", fundamentado=True):
         self.calls = []
         self._respuesta = respuesta
+        self._fundamentado = fundamentado
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
+        if kwargs.get("model") == MODELO_AUXILIAR:
+            return FakeResponse(json.dumps({"fundamentado": self._fundamentado}))
         return FakeResponse(self._respuesta)
 
 
 class FakeChat:
-    def __init__(self, respuesta="Descripción generada de prueba"):
-        self.completions = FakeCompletions(respuesta)
+    def __init__(self, respuesta="Descripción generada de prueba", fundamentado=True):
+        self.completions = FakeCompletions(respuesta, fundamentado)
 
 
 class FakeGroq:
-    def __init__(self, respuesta="Descripción generada de prueba"):
-        self.chat = FakeChat(respuesta)
+    def __init__(self, respuesta="Descripción generada de prueba", fundamentado=True):
+        self.chat = FakeChat(respuesta, fundamentado)
 
 
 # --- Fase 1/2 regression: fail-fast + request shape -----------------------
@@ -188,12 +194,12 @@ def test_context_provider_receives_the_transcript(monkeypatch):
 def test_default_context_provider_is_contexto_memoria_buscar_contexto(monkeypatch):
     """When `proveedor_contexto` is None, it resolves lazily to
     `contexto_memoria.buscar_contexto` — never raises, never touches
-    Groq's request shape when it returns no match."""
+    Groq's request shape when there's nothing to select from."""
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.delenv("MEMORY_DIR", raising=False)
+    monkeypatch.setenv("MEMORY_DIR", "ruta/que/no/existe")
 
     cliente = FakeGroq()
-    transcripcion = "texto que no coincide con ningún módulo conocido de memoria"
+    transcripcion = "texto que no coincide con ningún documento conocido"
 
     resultado = generar_descripcion(
         transcripcion,
@@ -237,6 +243,10 @@ def test_rules_3_and_4_require_full_omission_no_placeholder():
 
 def test_rule_6_modulo_afectado_fallback_literal():
     assert "Módulo afectado: no identificado" in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rule_7_requires_neutral_spanish():
+    assert "español neutro" in GENERADOR_DESCRIPCION_TICKET
 
 
 def test_rule_12_no_fence_no_preamble_wording():
@@ -346,91 +356,118 @@ def test_response_has_no_code_fence(monkeypatch):
     assert "```" not in resultado
 
 
-# --- Post-processor: es_relleno_generico -----------------------------------
+def test_generar_descripcion_calls_verifier_when_resultado_esperado_present(monkeypatch):
+    """End-to-end wiring: the SAME cliente is reused for the verifier call."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = (
+        f"## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
+    )
+    cliente = FakeGroq(respuesta=texto, fundamentado=True)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert len(cliente.chat.completions.calls) == 2
+    llamada_verificador = cliente.chat.completions.calls[1]
+    assert llamada_verificador["model"] == MODELO_AUXILIAR
+    assert llamada_verificador["response_format"] == {"type": "json_object"}
+    assert "#4521" in resultado
 
 
-# These three entries self-overlap with the scaffolding-prefix regexes
-# (design.md): stripping "se obtuvo "/"todo " from them leaves a residue
-# that is not itself a listed member, so they read as genuine in isolation.
-# Accepted per design's stated bias ("minimise false positives, accept
-# false negatives") — the regexes are not special-cased for these idioms.
-_FALSOS_NEGATIVOS_ACEPTADOS = {
-    "se obtuvo un resultado inesperado",
-    "todo funcionara bien",
-    "todo saliera bien",
-}
+def test_generar_descripcion_no_verifier_call_when_no_resultado_section(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = "## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeGroq(respuesta=texto)
+
+    generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert len(cliente.chat.completions.calls) == 1
 
 
-@pytest.mark.parametrize(
-    "frase", sorted(FRASES_GENERICAS - _FALSOS_NEGATIVOS_ACEPTADOS)
-)
-def test_es_relleno_generico_true_for_every_blocklist_phrase(frase):
-    assert es_relleno_generico(frase) is True
+# --- Post-processor: postprocesar_descripcion --------------------------------
 
 
-@pytest.mark.parametrize("frase", sorted(_FALSOS_NEGATIVOS_ACEPTADOS))
-def test_es_relleno_generico_accepted_false_negative_in_isolation(frase):
-    """Documents the accepted bias: these entries only registered as filler
-    when embedded in a sentence with different scaffolding, not bare."""
-    assert es_relleno_generico(frase) is False
+def test_postprocesar_verifier_says_grounded_keeps_text():
+    texto = (
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
+    )
+    cliente = FakeGroq(fundamentado=True)
+
+    assert postprocesar_descripcion(texto, "transcripción", cliente) == texto
 
 
-@pytest.mark.parametrize(
-    "cuerpo",
-    [
-        "Esperaba ver el ticket #4521 cerrado y obtuvo un error 500.",
-        "Se esperaba que el reporte `RPT-004` se generara sin intervención manual.",
-        'Esperaba que el mensaje dijera "guardado correctamente" y no dijo nada.',
-        "Esperaba ver el listado de auditorías completo.",
-    ],
-)
-def test_es_relleno_generico_false_for_genuine_bodies(cuerpo):
-    assert es_relleno_generico(cuerpo) is False
-
-
-def test_es_relleno_generico_false_for_empty_body():
-    assert es_relleno_generico("") is False
-
-
-# --- Post-processor: postprocesar_descripcion (table-driven) --------------
-
-
-def test_postprocesar_filler_body_replaced_with_notice_heading_kept():
+def test_postprocesar_verifier_says_not_grounded_replaces_with_notice():
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
         "## Qué pasó\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nSe esperaba que funcionara correctamente.\n"
     )
+    cliente = FakeGroq(fundamentado=False)
 
-    resultado = postprocesar_descripcion(texto)
+    resultado = postprocesar_descripcion(texto, "transcripción", cliente)
 
     assert ENCABEZADO_RESULTADO in resultado
     assert AVISO_RESULTADO_NO_CONFIABLE in resultado
     assert "funcionara correctamente" not in resultado
 
 
-def test_postprocesar_genuine_expectation_kept_byte_identical():
+def test_postprocesar_verifier_exception_defaults_to_keeping_text():
+    """A broken verifier must never erase real analyst-provided content."""
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
         "## Qué pasó\nAlgo pasó.\n\n"
-        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte exportado en PDF.\n"
     )
 
-    assert postprocesar_descripcion(texto) == texto
+    class ClienteRoto:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    raise RuntimeError("fallo de red simulado")
+
+    resultado = postprocesar_descripcion(texto, "transcripción", ClienteRoto())
+
+    assert resultado == texto
 
 
-def test_postprocesar_absent_section_is_a_no_op():
+def test_postprocesar_verifier_malformed_json_defaults_to_keeping_text():
+    texto = (
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte exportado en PDF.\n"
+    )
+
+    class ClienteRespuestaInvalida:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return FakeResponse("esto no es json")
+
+    resultado = postprocesar_descripcion(texto, "transcripción", ClienteRespuestaInvalida())
+
+    assert resultado == texto
+
+
+def test_postprocesar_absent_section_is_a_no_op_and_skips_verifier():
     texto = "## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeGroq()
 
-    assert postprocesar_descripcion(texto) == texto
+    assert postprocesar_descripcion(texto, "transcripción", cliente) == texto
+    assert cliente.chat.completions.calls == []
 
 
-def test_postprocesar_empty_body_becomes_notice():
+def test_postprocesar_empty_body_becomes_notice_without_calling_verifier():
     texto = f"## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n\n{ENCABEZADO_RESULTADO}\n\n"
+    cliente = FakeGroq()
 
-    resultado = postprocesar_descripcion(texto)
+    resultado = postprocesar_descripcion(texto, "transcripción", cliente)
 
     assert AVISO_RESULTADO_NO_CONFIABLE in resultado
+    assert cliente.chat.completions.calls == []
 
 
 def test_postprocesar_strips_wrapping_fence_keeps_inner_fence():
@@ -440,37 +477,30 @@ def test_postprocesar_strips_wrapping_fence_keeps_inner_fence():
         "## Qué pasó\nUsó `comando --flag` y falló.\n"
         "```"
     )
+    cliente = FakeGroq()
 
-    resultado = postprocesar_descripcion(texto)
+    resultado = postprocesar_descripcion(texto, "transcripción", cliente)
 
     assert not resultado.startswith("```")
     assert not resultado.endswith("```")
     assert "`comando --flag`" in resultado
-
-
-def test_postprocesar_mixed_genuine_and_filler_body_unchanged():
-    texto = (
-        "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nAlgo pasó.\n\n"
-        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte generado. Sin errores.\n"
-    )
-
-    assert postprocesar_descripcion(texto) == texto
+    assert cliente.chat.completions.calls == []
 
 
 def test_postprocesar_non_string_content_tolerates_none():
-    assert postprocesar_descripcion(None) == ""
+    assert postprocesar_descripcion(None, "transcripción", FakeGroq()) == ""
 
 
 def test_postprocesar_blank_string_passthrough():
-    assert postprocesar_descripcion("   ") == "   "
+    assert postprocesar_descripcion("   ", "transcripción", FakeGroq()) == "   "
 
 
 def test_fake_groq_canned_response_round_trips_unchanged():
     """The default FakeGroq canned text has no fence and no Resultado
     heading, so postprocesar_descripcion must no-op — every Fase 1/2
     assertion built on the literal canned string keeps holding."""
-    assert postprocesar_descripcion("Descripción generada de prueba") == (
+    cliente = FakeGroq()
+    assert postprocesar_descripcion("Descripción generada de prueba", "transcripción", cliente) == (
         "Descripción generada de prueba"
     )
 

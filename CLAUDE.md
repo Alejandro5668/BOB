@@ -127,6 +127,72 @@ it **Speech to Text access only** — no other endpoint is used.
 
 ---
 
+## Context retrieval decision
+
+`contexto_memoria.py` no longer requires any fixed layout under
+`MEMORY_DIR` (no `MEMORY.md` index, no `modulos/<nombre>/_modulo.md`
+convention) — it discovers ANY `.md` file, anywhere in the tree, and asks
+Groq itself which ones (if any) are relevant to a transcript, instead of
+scoring them with our own lexical-matching heuristic.
+
+**Why:** the real Kawak PHP documentation folder does not match the
+schema Fase 2 originally assumed at all — no index file, no per-module
+summary, modules as flat top-level folders each holding 10-30 per-screen
+`.md` files. The user explicitly rejected requiring any fixed structure:
+"no quiero una limitante... no serviría de nada la aplicación." Leaning
+on Groq's own judgment for relevance, rather than a hardcoded scoring
+algorithm, was an explicit request too.
+
+**How it's applied:** `listar_documentos()` recursively finds every
+`.md` file under `MEMORY_DIR` (capped at `MAX_DOCUMENTOS_LISTADOS` as a
+volume safety valve, not a schema requirement) and builds a lightweight
+`ruta: vista previa` listing. `elegir_documentos_relevantes()` sends that
+listing to Groq (`MODELO_SELECTOR`, currently `openai/gpt-oss-20b`) and
+only trusts paths the model picked that were actually in the listing
+(never an invented path). `nombres_conocidos()` (used for ElevenLabs
+`keyterms`) now derives from folder/file basenames found on disk instead
+of a parsed alias list — also schema-free.
+
+**Real corpus constraint (verified live, not assumed):** the real Kawak
+docs folder is 273 files; a single-request listing exceeded Groq's
+free-tier TPM limit for `gpt-oss-20b` (8000 TPM; a single listing needed
+~14000). `elegir_documentos_relevantes()` batches the listing
+(`CARACTERES_POR_LOTE`) and stops early once `MAX_ARCHIVOS_SELECCIONADOS`
+is reached — this must keep scaling as `memory/` grows, not just work
+for today's fixture.
+
+**`gpt-oss` reasoning-token gotcha (verified live):** `openai/gpt-oss-20b`
+reasons internally before answering, and those reasoning tokens count
+against `max_tokens`. A 200-token cap on the selector call cut reasoning
+off mid-thought, leaving an empty completion that Groq's
+`response_format: json_object` mode then rejected with a 400. Fix:
+`reasoning_effort="low"` (cuts reasoning-token cost roughly 10x, measured
+227→14 on a real batch) plus a generous `max_tokens` (500 for the
+selector, 150 for the verifier below). Any future call to a `gpt-oss`
+model with JSON mode must account for this — don't reintroduce a small
+`max_tokens` without `reasoning_effort` set.
+
+## Anti-hallucination check decision
+
+`generar_descripcion.py`'s "Resultado esperado vs. obtenido" defense-in-depth
+no longer matches the model's output against a fixed blocklist of ~57
+generic phrases — it asks Groq itself (`MODELO_AUXILIAR`, same
+`openai/gpt-oss-20b`) whether the stated expectation is explicitly
+grounded in the transcript, replacing the section with a fixed notice
+only when the model says it isn't.
+
+**Why:** the user explicitly distrusted the fixed-phrase-array approach
+("no me convencen del todo, prefiero algo más útil, más funcional") — a
+static list can never cover every way of phrasing an invented
+expectation. Same `reasoning_effort`/`max_tokens` gotcha applies here.
+
+**Failure policy:** if the verifier call itself fails (network error,
+malformed JSON), default to `True` (assume grounded, keep the model's
+original text) — a broken verifier must never silently erase real
+analyst-provided content.
+
+---
+
 ## Logging convention
 
 `logging_config.py` wires stdlib `logging` once at process start (called

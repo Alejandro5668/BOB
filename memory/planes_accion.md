@@ -1,4 +1,4 @@
-# Módulo: Planes de Acción
+# Planes de acción
 
 ## Propósito
 

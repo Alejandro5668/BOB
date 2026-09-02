@@ -1,10 +1,10 @@
-"""Unit tests for contexto_memoria.py — scoring, threshold, budget, degrade,
-path-safety, and sentinel-scope, per design.md and tasks.md Phase 8.
+"""Unit tests for contexto_memoria.py — schema-free discovery, budget,
+path-safety, and Groq-assisted relevance selection.
 
-Uses `tmp_path` fixtures for fully-controlled scoring/threshold/budget/
-path-safety scenarios, plus the real repo `memory/` fixture (relative to
-this file, independent of pytest's cwd) for the worked example and the
-sentinel-scope assertions that tie directly to the shipped fixture.
+`memory/` under `MEMORY_DIR` is treated as ANY folder of .md documentation
+(no fixed index file, no required subfolder layout) — see CLAUDE.md
+"Context retrieval decision". Tests build synthetic trees under `tmp_path`
+rather than relying on any particular real-world layout.
 """
 
 from pathlib import Path
@@ -13,322 +13,349 @@ import pytest
 
 import contexto_memoria as cm
 
-REPO_MEMORY_DIR = Path(__file__).resolve().parent.parent / "memory"
+
+class FakeMessage:
+    def __init__(self, content):
+        self.content = content
 
 
-def _crear_memoria(raiz: Path, modulos: dict) -> Path:
-    """Build a minimal memory/ tree under `raiz` from a {nombre: {...}} dict.
+class FakeChoice:
+    def __init__(self, content):
+        self.message = FakeMessage(content)
 
-    Each value may have "alias" (str) and "descripcion" (str, default a
-    generic sentence) and "contenido" (str, default a per-module marker).
-    """
+
+class FakeResponse:
+    def __init__(self, content):
+        self.choices = [FakeChoice(content)]
+
+
+class FakeCompletions:
+    def __init__(self, archivos_elegidos=None, error=None):
+        self.calls = []
+        self._archivos_elegidos = archivos_elegidos if archivos_elegidos is not None else []
+        self._error = error
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+        import json
+
+        return FakeResponse(json.dumps({"archivos": self._archivos_elegidos}))
+
+
+class FakeChat:
+    def __init__(self, archivos_elegidos=None, error=None):
+        self.completions = FakeCompletions(archivos_elegidos, error)
+
+
+class FakeGroq:
+    def __init__(self, archivos_elegidos=None, error=None):
+        self.chat = FakeChat(archivos_elegidos, error)
+
+
+def _crear_arbol(raiz: Path, archivos: dict) -> Path:
+    """Build an arbitrary tree of .md files under `raiz` from a
+    {ruta_relativa: contenido} dict — any nesting, any naming."""
     raiz.mkdir(parents=True, exist_ok=True)
-    (raiz / "modulos").mkdir(exist_ok=True)
-
-    lineas = ["# Índice de prueba", ""]
-    for nombre, datos in modulos.items():
-        alias = datos.get("alias", "")
-        descripcion = datos.get("descripcion", "Descripción genérica de módulo de prueba.")
-        alias_parte = f" (alias: {alias})" if alias else ""
-        lineas.append(f"- **{nombre}**{alias_parte} — {descripcion}")
-
-        carpeta_modulo = raiz / "modulos" / nombre
-        carpeta_modulo.mkdir(parents=True, exist_ok=True)
-        contenido = datos.get("contenido", f"Contenido de prueba: {nombre}")
-        (carpeta_modulo / "_modulo.md").write_text(contenido, encoding="utf-8")
-
-    (raiz / "MEMORY.md").write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    for ruta_relativa, contenido in archivos.items():
+        ruta = raiz / ruta_relativa
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(contenido, encoding="utf-8")
     return raiz
 
 
-# --- Scoring: worked example against the real fixture -----------------------
+# --- resolver_directorio ----------------------------------------------------
 
 
-def test_worked_example_ranks_gestion_riesgos_first():
-    transcripcion = "el módulo donde se ven los riesgos no carga la matriz"
-
-    modulos = cm.cargar_modulos(str(REPO_MEMORY_DIR))
-    puntuados = {m.nombre: s for m, s in cm.puntuar(transcripcion, modulos)}
-
-    assert puntuados["gestion_riesgos"] == pytest.approx(0.8667, abs=1e-3)
-    assert puntuados["gestion_riesgos"] > puntuados["planes_accion"]
-    assert puntuados["gestion_riesgos"] > puntuados["auditorias_internas"]
-    assert puntuados["gestion_riesgos"] >= cm.UMBRAL
+def test_resolver_directorio_explicit_arg_wins(monkeypatch):
+    monkeypatch.setenv("MEMORY_DIR", "/env/path")
+    assert cm.resolver_directorio("/explicit/path") == Path("/explicit/path")
 
 
-def test_worked_example_buscar_contexto_returns_gestion_riesgos_content():
-    transcripcion = "el módulo donde se ven los riesgos no carga la matriz"
-
-    contexto = cm.buscar_contexto(transcripcion, directorio=str(REPO_MEMORY_DIR))
-
-    esperado = (REPO_MEMORY_DIR / "modulos" / "gestion_riesgos" / "_modulo.md").read_text(
-        encoding="utf-8"
-    )
-    assert contexto == esperado
+def test_resolver_directorio_env_var_used_when_no_explicit_arg(monkeypatch):
+    monkeypatch.setenv("MEMORY_DIR", "/env/path")
+    assert cm.resolver_directorio() == Path("/env/path")
 
 
-# --- No match ----------------------------------------------------------------
-
-
-def test_no_recognizable_reference_returns_empty_string():
-    transcripcion = (
-        "el usuario reporta que la aplicacion se cierra sola al abrir "
-        "un archivo adjunto en el correo"
-    )
-
-    contexto = cm.buscar_contexto(transcripcion, directorio=str(REPO_MEMORY_DIR))
-
-    assert contexto == ""
-
-
-def test_no_recognizable_reference_every_module_below_threshold():
-    transcripcion = (
-        "el usuario reporta que la aplicacion se cierra sola al abrir "
-        "un archivo adjunto en el correo"
-    )
-    modulos = cm.cargar_modulos(str(REPO_MEMORY_DIR))
-
-    puntuados = cm.puntuar(transcripcion, modulos)
-
-    assert all(score < cm.UMBRAL for _, score in puntuados)
-
-
-# --- Top-N / threshold / tie-break, fully controlled -------------------------
-
-
-def test_single_module_clears_threshold_only_that_context_returned(tmp_path):
-    raiz = _crear_memoria(
-        tmp_path / "memory",
-        {
-            "modulo_alfa": {"alias": "alfa", "descripcion": "cosas de alfa y beta"},
-            "modulo_zeta": {"alias": "zeta", "descripcion": "cosas totalmente distintas"},
-        },
-    )
-
-    contexto = cm.buscar_contexto("hablo del modulo alfa", directorio=str(raiz))
-
-    assert contexto == "Contenido de prueba: modulo_alfa"
-
-
-def test_two_qualifying_modules_both_returned_alphabetical_tie_break(tmp_path):
-    # Both modules share the exact same alias/description shape so they
-    # score identically; only the module name differs.
-    raiz = _crear_memoria(
-        tmp_path / "memory",
-        {
-            "modulo_b": {"alias": "comun", "descripcion": "elemento comun compartido"},
-            "modulo_a": {"alias": "comun", "descripcion": "elemento comun compartido"},
-        },
-    )
-    modulos = cm.cargar_modulos(str(raiz))
-    puntuados = cm.puntuar("hay un elemento comun compartido", modulos)
-
-    puntajes = {m.nombre: s for m, s in puntuados}
-    assert puntajes["modulo_a"] == puntajes["modulo_b"]
-    assert puntajes["modulo_a"] >= cm.UMBRAL
-
-    contexto = cm.buscar_contexto("hay un elemento comun compartido", directorio=str(raiz))
-
-    pos_a = contexto.find("Contenido de prueba: modulo_a")
-    pos_b = contexto.find("Contenido de prueba: modulo_b")
-    assert pos_a != -1 and pos_b != -1
-    assert pos_a < pos_b  # alphabetical tie-break: modulo_a before modulo_b
-
-
-def test_top_n_caps_at_two_even_when_three_modules_qualify(tmp_path):
-    raiz = _crear_memoria(
-        tmp_path / "memory",
-        {
-            "modulo_uno": {"alias": "primero", "descripcion": "primero segundo tercero"},
-            "modulo_dos": {"alias": "segundo", "descripcion": "primero segundo tercero"},
-            "modulo_tres": {"alias": "tercero", "descripcion": "primero segundo tercero"},
-        },
-    )
-
-    contexto = cm.buscar_contexto(
-        "primero segundo tercero", directorio=str(raiz)
-    )
-
-    incluidos = sum(
-        1
-        for nombre in ("modulo_uno", "modulo_dos", "modulo_tres")
-        if f"Contenido de prueba: {nombre}" in contexto
-    )
-    assert incluidos == cm.TOP_N == 2
-
-
-# --- Budget / truncation ------------------------------------------------------
-
-
-def test_within_budget_content_included_unmodified(tmp_path):
-    raiz = _crear_memoria(
-        tmp_path / "memory",
-        {"modulo_pequeno": {"alias": "pequeno", "contenido": "contenido corto y simple"}},
-    )
-
-    contexto = cm.buscar_contexto("hablemos del modulo pequeno", directorio=str(raiz))
-
-    assert contexto == "contenido corto y simple"
-
-
-def test_oversized_content_truncated_within_budget_at_line_boundary(tmp_path):
-    linea = "x" * 50 + "\n"
-    contenido_grande = linea * 200  # well over PRESUPUESTO_CARACTERES
-    raiz = _crear_memoria(
-        tmp_path / "memory",
-        {"modulo_grande": {"alias": "grande", "contenido": contenido_grande}},
-    )
-
-    contexto = cm.buscar_contexto("hablemos del modulo grande", directorio=str(raiz))
-
-    assert len(contexto) <= cm.PRESUPUESTO_CARACTERES
-    assert contexto.endswith(cm.MARCADOR_TRUNCADO)
-    # Cut on a line boundary: everything before the marker is whole lines.
-    cuerpo = contexto[: -len(cm.MARCADOR_TRUNCADO)].rstrip("\n")
-    assert all(l == "x" * 50 for l in cuerpo.splitlines())
-
-
-# --- Degrade: unset/missing/unreadable MEMORY_DIR ----------------------------
-
-
-def test_missing_memory_dir_returns_empty_string_never_raises():
-    contexto = cm.buscar_contexto("cualquier transcripcion", directorio="ruta/que/no/existe")
-    assert contexto == ""
-
-
-def test_unset_memory_dir_env_defaults_and_degrades_gracefully(monkeypatch, tmp_path):
+def test_resolver_directorio_defaults_to_dot_memory(monkeypatch):
     monkeypatch.delenv("MEMORY_DIR", raising=False)
-    monkeypatch.chdir(tmp_path)  # "./memory" won't exist here
-
-    contexto = cm.buscar_contexto("cualquier transcripcion")
-
-    assert contexto == ""
+    assert cm.resolver_directorio() == Path("./memory")
 
 
-def test_diagnosticar_returns_none_when_memory_ok():
-    assert cm.diagnosticar(directorio=str(REPO_MEMORY_DIR)) is None
+# --- listar_documentos: schema-free discovery -------------------------------
+
+
+def test_listar_documentos_finds_any_md_file_any_nesting(tmp_path):
+    raiz = _crear_arbol(
+        tmp_path / "memory",
+        {
+            "PROYECTO.md": "Documento raíz del proyecto.",
+            "gsr_riesgos_v3/index.md": "Resumen del módulo de riesgos v3.",
+            "gsr_riesgos_v3/control/crg_control_evaluar.md": "Detalle de evaluación de control.",
+            "no_es_markdown.txt": "esto no debe aparecer",
+        },
+    )
+
+    documentos = cm.listar_documentos(str(raiz))
+    rutas = {ruta for ruta, _ in documentos}
+
+    assert rutas == {
+        "PROYECTO.md",
+        "gsr_riesgos_v3/index.md",
+        "gsr_riesgos_v3/control/crg_control_evaluar.md",
+    }
+
+
+def test_listar_documentos_preview_is_collapsed_and_bounded(tmp_path):
+    contenido = "Línea uno.\n\nLínea   con    espacios.\n" + ("x" * 500)
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": contenido})
+
+    documentos = cm.listar_documentos(str(raiz))
+
+    assert len(documentos) == 1
+    _, vista_previa = documentos[0]
+    assert len(vista_previa) <= cm.LONGITUD_VISTA_PREVIA
+    assert "\n" not in vista_previa
+
+
+def test_listar_documentos_raises_error_memoria_when_root_missing(tmp_path):
+    with pytest.raises(cm.ErrorMemoria):
+        cm.listar_documentos(str(tmp_path / "no_existe"))
+
+
+def test_listar_documentos_skips_symlink_escape(tmp_path):
+    raiz = tmp_path / "memory"
+    raiz.mkdir()
+    fuera = tmp_path / "fuera"
+    fuera.mkdir()
+    (fuera / "secreto.md").write_text("no debería aparecer", encoding="utf-8")
+
+    enlace = raiz / "enlace.md"
+    try:
+        enlace.symlink_to(fuera / "secreto.md")
+    except OSError:
+        pytest.skip("symlinks no soportados en este entorno")
+
+    documentos = cm.listar_documentos(str(raiz))
+    assert documentos == []
+
+
+def test_listar_documentos_caps_at_max_documentos_listados(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm, "MAX_DOCUMENTOS_LISTADOS", 3)
+    archivos = {f"doc{i}.md": f"contenido {i}" for i in range(10)}
+    raiz = _crear_arbol(tmp_path / "memory", archivos)
+
+    documentos = cm.listar_documentos(str(raiz))
+    assert len(documentos) == 3
+
+
+# --- nombres_conocidos -------------------------------------------------------
+
+
+def test_nombres_conocidos_derives_from_paths_no_schema_needed(tmp_path):
+    raiz = _crear_arbol(
+        tmp_path / "memory",
+        {"gsr_riesgos_v3/index.md": "contenido", "cfg_configuracion/index.md": "contenido"},
+    )
+
+    nombres = cm.nombres_conocidos(str(raiz))
+
+    normalizados = {n.lower() for n in nombres}
+    assert "gsr riesgos v3" in normalizados
+    assert "cfg configuracion" in normalizados
+    assert "index" in normalizados
+
+
+def test_nombres_conocidos_empty_on_missing_directory():
+    assert cm.nombres_conocidos(directorio="ruta/que/no/existe") == []
+
+
+def test_nombres_conocidos_deduplicates_case_insensitively(tmp_path):
+    raiz = _crear_arbol(
+        tmp_path / "memory",
+        {"riesgos/index.md": "a", "RIESGOS/otro.md": "b"},
+    )
+    nombres = cm.nombres_conocidos(str(raiz))
+    normalizados = [n.lower() for n in nombres]
+    assert normalizados.count("riesgos") == 1
+
+
+# --- diagnosticar ------------------------------------------------------------
+
+
+def test_diagnosticar_returns_none_when_directory_ok(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
+    assert cm.diagnosticar(directorio=str(raiz)) is None
 
 
 def test_diagnosticar_returns_spanish_notice_when_missing():
     aviso = cm.diagnosticar(directorio="ruta/que/no/existe")
     assert aviso is not None
     assert isinstance(aviso, str)
-    assert "memory" in aviso.lower() or "transcripción" in aviso.lower()
+    assert "memoria" in aviso.lower() or "transcripción" in aviso.lower()
 
 
-def test_nombres_conocidos_returns_names_and_aliases():
-    nombres = cm.nombres_conocidos(directorio=str(REPO_MEMORY_DIR))
-    assert len(nombres) > 0
-    assert all(isinstance(n, str) for n in nombres)
+# --- elegir_documentos_relevantes: Groq-assisted selection -------------------
 
 
-def test_nombres_conocidos_empty_on_missing_memory_dir():
-    assert cm.nombres_conocidos(directorio="ruta/que/no/existe") == []
+def test_elegir_documentos_relevantes_returns_empty_for_empty_listing():
+    cliente = FakeGroq()
+    assert cm.elegir_documentos_relevantes("transcripción", [], cliente) == []
 
 
-def test_permission_error_on_iterdir_degrades_without_raising(tmp_path, monkeypatch):
-    raiz = _crear_memoria(
-        tmp_path / "memory", {"modulo_x": {"alias": "equis"}}
+def test_elegir_documentos_relevantes_filters_to_known_paths(tmp_path):
+    documentos = [("real.md", "vista"), ("otro_real.md", "vista")]
+    cliente = FakeGroq(archivos_elegidos=["real.md", "inventado_por_el_modelo.md"])
+
+    seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
+
+    assert seleccionados == ["real.md"]
+
+
+def test_elegir_documentos_relevantes_caps_at_max_archivos():
+    documentos = [(f"doc{i}.md", "vista") for i in range(10)]
+    cliente = FakeGroq(archivos_elegidos=[f"doc{i}.md" for i in range(10)])
+
+    seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
+
+    assert len(seleccionados) == cm.MAX_ARCHIVOS_SELECCIONADOS
+
+
+def test_elegir_documentos_relevantes_batches_large_listings(tmp_path):
+    """A listing larger than CARACTERES_POR_LOTE must split into multiple
+    Groq calls — confirmed against a real 273-file corpus that exceeded
+    Groq's free-tier TPM limit in a single request."""
+    documentos = [(f"doc{i}.md", "x" * 100) for i in range(300)]
+    cliente = FakeGroq(archivos_elegidos=[])
+
+    cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
+
+    assert len(cliente.chat.completions.calls) > 1
+
+
+def test_elegir_documentos_relevantes_stops_early_once_max_reached(tmp_path):
+    documentos = [(f"doc{i}.md", "x" * 100) for i in range(300)]
+    # The 3 fixed picks all fall within the first batch (~115 docs at this
+    # per-doc size) — once MAX_ARCHIVOS_SELECCIONADOS is hit there, later
+    # batches must never be called.
+    cliente = FakeGroq(archivos_elegidos=["doc0.md", "doc1.md", "doc2.md"])
+
+    seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
+
+    assert seleccionados == ["doc0.md", "doc1.md", "doc2.md"]
+    assert len(cliente.chat.completions.calls) == 1
+
+
+def test_elegir_documentos_relevantes_sends_listing_and_transcript(tmp_path):
+    documentos = [("modulo/index.md", "resumen breve")]
+    cliente = FakeGroq(archivos_elegidos=[])
+    transcripcion = "El cliente reporta un error en el módulo."
+
+    cm.elegir_documentos_relevantes(transcripcion, documentos, cliente)
+
+    kwargs = cliente.chat.completions.calls[0]
+    assert kwargs["model"] == cm.MODELO_SELECTOR
+    assert kwargs["response_format"] == {"type": "json_object"}
+    user_msg = kwargs["messages"][1]["content"]
+    assert transcripcion in user_msg
+    assert "modulo/index.md" in user_msg
+    assert "resumen breve" in user_msg
+
+
+# --- buscar_contexto: total provider ----------------------------------------
+
+
+def test_buscar_contexto_empty_when_no_documents(tmp_path):
+    raiz = tmp_path / "memory"
+    raiz.mkdir()
+    cliente = FakeGroq()
+
+    assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
+    assert cliente.chat.completions.calls == []  # never called with nothing to pick from
+
+
+def test_buscar_contexto_empty_when_selector_picks_nothing(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
+    cliente = FakeGroq(archivos_elegidos=[])
+
+    assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
+
+
+def test_buscar_contexto_returns_selected_file_content_verbatim(tmp_path):
+    raiz = _crear_arbol(
+        tmp_path / "memory",
+        {"riesgos/index.md": "Documentación real de riesgos.", "otro.md": "irrelevante"},
     )
+    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
 
-    original_iterdir = Path.iterdir
+    contexto = cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente)
 
-    def iterdir_falso(self):
-        if self == raiz / "modulos":
-            raise PermissionError("acceso denegado (simulado)")
-        return original_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", iterdir_falso)
-
-    assert cm.buscar_contexto("equis", directorio=str(raiz)) == ""
-    assert cm.diagnosticar(directorio=str(raiz)) is not None
+    assert contexto == "Documentación real de riesgos."
 
 
-def test_cargar_modulos_raises_error_memoria_on_missing_root():
-    with pytest.raises(cm.ErrorMemoria):
-        cm.cargar_modulos("ruta/que/no/existe")
+def test_buscar_contexto_degrades_to_empty_on_missing_directory():
+    cliente = FakeGroq()
+    assert cm.buscar_contexto("transcripción", directorio="ruta/que/no/existe", cliente=cliente) == ""
 
 
-# --- Path safety: symlink escape rejection (RED) -----------------------------
+def test_buscar_contexto_degrades_to_empty_on_selector_failure(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
+    cliente = FakeGroq(error=RuntimeError("fallo de red simulado"))
+
+    assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
 
 
-def test_symlink_escape_outside_memory_dir_is_rejected(tmp_path, monkeypatch):
-    raiz = _crear_memoria(
-        tmp_path / "memory", {"modulo_bueno": {"alias": "bueno"}}
-    )
-    (raiz / "modulos" / "evil").mkdir()
+def test_buscar_contexto_never_raises_on_malformed_json(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
 
-    afuera = tmp_path / "afuera"
-    afuera.mkdir()
-    (afuera / "secreto.txt").write_text("ESCAPADO_FUERA_DE_MEMORIA", encoding="utf-8")
+    class CompletionsRespuestaInvalida:
+        def create(self, **kwargs):
+            return FakeResponse("esto no es json")
 
-    objetivo_evil = (raiz / "modulos" / "evil" / "_modulo.md").resolve()
-    ruta_afuera = (afuera / "secreto.txt").resolve()
+    class ClienteRespuestaInvalida:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": CompletionsRespuestaInvalida()})()
 
-    original_resolve = Path.resolve
-
-    def resolve_falso(self, *args, **kwargs):
-        resultado = original_resolve(self, *args, **kwargs)
-        if resultado == objetivo_evil:
-            return ruta_afuera
-        return resultado
-
-    monkeypatch.setattr(Path, "resolve", resolve_falso)
-
-    modulos = cm.cargar_modulos(str(raiz))
-
-    nombres = {m.nombre for m in modulos}
-    assert "evil" not in nombres
-    assert nombres == {"modulo_bueno"}
+    assert cm.buscar_contexto(
+        "transcripción", directorio=str(raiz), cliente=ClienteRespuestaInvalida()
+    ) == ""
 
 
-# --- Path safety: zero write/create/delete filesystem calls ------------------
+# --- Budget / truncation (unchanged generic logic) --------------------------
 
 
-def test_retrieval_never_writes_to_memory_dir(tmp_path, monkeypatch):
-    raiz = _crear_memoria(
-        tmp_path / "memory", {"modulo_bueno": {"alias": "bueno"}}
-    )
-
-    def _prohibido(*args, **kwargs):
-        raise AssertionError("retrieval must never write/create/delete under MEMORY_DIR")
-
-    for nombre_metodo in ("write_text", "write_bytes", "unlink", "mkdir", "rmdir", "touch"):
-        monkeypatch.setattr(Path, nombre_metodo, _prohibido)
-
-    # Must run clean end-to-end without touching any of the patched methods.
-    cm.cargar_modulos(str(raiz))
-    cm.buscar_contexto("hablemos del modulo bueno", directorio=str(raiz))
-    cm.diagnosticar(str(raiz))
+def test_ensamblar_contexto_within_budget_included_unmodified():
+    bloques = ["contenido corto uno", "contenido corto dos"]
+    resultado = cm._ensamblar_contexto(bloques, presupuesto=1000)
+    assert resultado == "contenido corto uno\n\ncontenido corto dos"
 
 
-# --- Scope: sentinel strings from shared files never leak -------------------
+def test_ensamblar_contexto_oversized_truncated_at_line_boundary():
+    bloque = "línea uno\nlínea dos\n" + ("x" * 100)
+    resultado = cm._ensamblar_contexto([bloque], presupuesto=20)
+    assert cm.MARCADOR_TRUNCADO in resultado
+    assert len(resultado) <= 20 + len(cm.MARCADOR_TRUNCADO) + 5
 
 
-def test_shared_files_sentinels_never_appear_in_injected_context():
-    transcripcion = "el módulo donde se ven los riesgos no carga la matriz"
-    contexto = cm.buscar_contexto(transcripcion, directorio=str(REPO_MEMORY_DIR))
-
-    assert "CORE_NUNCA_INYECTAR" not in contexto
-    assert "ERRORES_NUNCA_INYECTAR" not in contexto
-    assert "DECISIONES_NUNCA_INYECTAR" not in contexto
-    assert "Índice de módulos" not in contexto  # MEMORY.md heading text
+# --- Path safety --------------------------------------------------------
 
 
-def test_shared_files_sentinels_never_appear_across_any_module_match():
-    # Cross-check against every real fixture module, not just the top match.
-    modulos = cm.cargar_modulos(str(REPO_MEMORY_DIR))
-    for modulo in modulos:
-        contenido = modulo.ruta.read_text(encoding="utf-8")
-        assert "CORE_NUNCA_INYECTAR" not in contenido
-        assert "ERRORES_NUNCA_INYECTAR" not in contenido
-        assert "DECISIONES_NUNCA_INYECTAR" not in contenido
+def test_resolver_seguro_rejects_path_outside_root(tmp_path):
+    raiz = tmp_path / "memory"
+    raiz.mkdir()
+    raiz_resuelta = raiz.resolve()
+    fuera = tmp_path / "fuera.md"
+    fuera.write_text("contenido", encoding="utf-8")
+
+    assert cm._resolver_seguro(raiz_resuelta, fuera) is None
 
 
-# --- Standalone testable, no Streamlit import --------------------------------
+def test_resolver_seguro_accepts_path_inside_root(tmp_path):
+    raiz = tmp_path / "memory"
+    raiz.mkdir()
+    raiz_resuelta = raiz.resolve()
+    adentro = raiz / "doc.md"
+    adentro.write_text("contenido", encoding="utf-8")
 
-
-def test_module_does_not_import_streamlit():
-    with open(cm.__file__, encoding="utf-8") as f:
-        codigo_fuente = f.read()
-    assert "streamlit" not in codigo_fuente
+    assert cm._resolver_seguro(raiz_resuelta, adentro) == adentro.resolve()

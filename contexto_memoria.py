@@ -1,92 +1,54 @@
-"""Module context retrieval from the read-only `memory/` fixture.
+"""Schema-free document retrieval from the read-only `memory/` folder.
 
-Reads `MEMORY.md` and `modulos/<carpeta>/_modulo.md` under `MEMORY_DIR`
-(default `./memory`), scores each module against an approved transcript
-using stdlib-only lexical matching (`difflib` for fuzzy name matching plus
-normalized token overlap for description matching), and returns bounded,
-literal context for the top matching module(s) — or `""` when nothing
-clears the confidence threshold, or the memory root is missing/unreadable.
+`MEMORY_DIR` can be ANY folder of Markdown documentation — no fixed index
+file, no required subfolder layout, no per-module summary convention.
+This deliberately replaced an earlier design that required a `MEMORY.md`
+index + `modulos/<carpeta>/_modulo.md` layout: the real Kawak PHP
+documentation folder has neither (see CLAUDE.md "Context retrieval
+decision" for why).
+
+Every `.md` file found anywhere under `MEMORY_DIR` is a candidate. Instead
+of our own lexical scoring heuristic, Groq itself picks which files (if
+any) are relevant to a transcript, given a lightweight file listing —
+leaning on the model's judgment rather than a fixed matching algorithm.
 
 Never imports Streamlit (see spec "Standalone Testable Module"). Never
 writes, creates, or deletes anything under `MEMORY_DIR`: only `is_dir`,
-`is_file`, `iterdir`, `resolve`, and `read_text` are used.
+`is_file`, `rglob`, `resolve`, and `read_text` are used.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-import re
-import unicodedata
-from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# --- Pinned constants (see design.md "Pinned Values") ------------------
-
-TOP_N = 2
-UMBRAL = 0.35
-PESO_NOMBRE = 0.6
-PESO_DESCRIPCION = 0.4
-PISO_DIFUSO = 0.80
-SATURACION_DESCRIPCION = 3
 PRESUPUESTO_CARACTERES = 6000
-
 MARCADOR_TRUNCADO = "[contenido truncado]"
+
+MAX_DOCUMENTOS_LISTADOS = 500  # safety valve on listing size, not a schema requirement
+MAX_ARCHIVOS_SELECCIONADOS = 3
+LONGITUD_VISTA_PREVIA = 160
+
+# gpt-oss models reason internally before answering, and those reasoning
+# tokens count against max_tokens — confirmed live: a 200-token cap cut the
+# reasoning off mid-thought, leaving an empty completion Groq's JSON mode
+# then rejected as invalid (400). reasoning_effort="low" cuts that
+# reasoning-token cost by ~10x (measured 227 -> 14 tokens on a real batch).
+MODELO_SELECTOR = "openai/gpt-oss-20b"  # cheaper/faster than the generation model
 
 ProveedorContexto = Callable[[str], str]
 
-# Small, deliberately conservative Spanish stopword list: only words that
-# would otherwise dilute lexical matching (articles, prepositions,
-# conjunctions, common connectors). Domain words are never added here.
-_STOPWORDS_ES = frozenset(
-    {
-        "los", "las", "del", "por", "con", "sin", "como", "donde", "cuando",
-        "que", "son", "hay", "muy", "sus", "para", "una", "uno", "unos",
-        "unas", "este", "esta", "esos", "esas", "ese", "esa", "todo", "toda",
-        "todos", "todas", "tambien", "entre", "sobre", "pero", "mas", "nos",
-        "les", "cada", "otra", "otro", "otras", "otros", "desde", "hasta",
-        "solo", "aun", "the", "and",
-    }
-)
-
-_PATRON_INDICE = re.compile(
-    r"^-\s*\*\*(?P<nombre>[^*]+)\*\*\s*"
-    r"(?:\(\s*alias\s*:\s*(?P<alias>[^)]*)\))?\s*[—-]\s*(?P<desc>.+)$"
-)
-
-
-@dataclass(frozen=True)
-class Modulo:
-    nombre: str
-    alias: tuple[str, ...]
-    descripcion: str
-    ruta: Path
-
 
 class ErrorMemoria(RuntimeError):
-    """Raised by the strict loader when the memory root is absent/unreadable."""
+    """Raised when the memory root itself is absent/unreadable."""
 
 
-# --- Normalization / tokenization ---------------------------------------
-
-
-def _normalizar(texto: str) -> str:
-    forma = unicodedata.normalize("NFKD", texto)
-    sin_diacriticos = "".join(c for c in forma if not unicodedata.combining(c))
-    return sin_diacriticos.lower()
-
-
-def _tokenizar(texto: str) -> list[str]:
-    normalizado = _normalizar(texto)
-    crudos = re.findall(r"[a-z0-9]+", normalizado)
-    return [t for t in crudos if len(t) >= 3 and t not in _STOPWORDS_ES]
-
-
-# --- Directory resolution + strict loader -------------------------------
+# --- Directory resolution -------------------------------------------------
 
 
 def resolver_directorio(directorio: Optional[str] = None) -> Path:
@@ -97,18 +59,18 @@ def resolver_directorio(directorio: Optional[str] = None) -> Path:
     return Path(valor)
 
 
-def _parsear_indice(texto: str) -> dict[str, tuple[str, tuple[str, ...], str]]:
-    indice: dict[str, tuple[str, tuple[str, ...], str]] = {}
-    for linea in texto.splitlines():
-        coincidencia = _PATRON_INDICE.match(linea.strip())
-        if not coincidencia:
-            continue
-        nombre = coincidencia.group("nombre").strip()
-        alias_bruto = coincidencia.group("alias") or ""
-        alias = tuple(a.strip() for a in alias_bruto.split(",") if a.strip())
-        descripcion = coincidencia.group("desc").strip()
-        indice[nombre] = (nombre, alias, descripcion)
-    return indice
+def _verificar_directorio(raiz: Path) -> Path:
+    """Raise ErrorMemoria if `raiz` is missing/unreadable; else return its resolved form."""
+    try:
+        es_directorio = raiz.is_dir()
+    except OSError as exc:
+        raise ErrorMemoria(f"No se pudo acceder a la carpeta de memoria: {exc}") from exc
+    if not es_directorio:
+        raise ErrorMemoria(f"La carpeta de memoria no existe o no es un directorio: {raiz}")
+    try:
+        return raiz.resolve()
+    except OSError as exc:
+        raise ErrorMemoria(f"No se pudo resolver la carpeta de memoria: {exc}") from exc
 
 
 def _resolver_seguro(raiz_resuelta: Path, candidato: Path) -> Optional[Path]:
@@ -128,124 +90,69 @@ def _resolver_seguro(raiz_resuelta: Path, candidato: Path) -> Optional[Path]:
     return candidato_resuelto
 
 
-def cargar_modulos(directorio: Optional[str] = None) -> list[Modulo]:
-    """Strict loader: parse `MEMORY.md` and load modules from `modulos/`.
+def _vista_previa(texto: str, limite: int = LONGITUD_VISTA_PREVIA) -> str:
+    return " ".join(texto.split())[:limite]
 
-    Raises `ErrorMemoria` when the memory root or `MEMORY.md` is missing
-    or unreadable. A folder under `modulos/` absent from `MEMORY.md` is
-    indexed with its folder name only; an index entry with no
-    `_modulo.md` (or one that resolves outside the memory root) is
-    skipped, never fatal.
+
+# --- Discovery: any .md file, any layout -----------------------------------
+
+
+def listar_documentos(directorio: Optional[str] = None) -> list[tuple[str, str]]:
+    """List every `.md` file under `directorio`, however it's organized.
+
+    Returns `(ruta_relativa_posix, vista_previa)` pairs, sorted for
+    determinism. Raises `ErrorMemoria` if the root itself is missing or
+    unreadable; individual unreadable files are skipped, never fatal.
+    Capped at `MAX_DOCUMENTOS_LISTADOS` as a volume safety valve, not a
+    structural requirement.
     """
     raiz = resolver_directorio(directorio)
+    raiz_resuelta = _verificar_directorio(raiz)
 
     try:
-        es_directorio = raiz.is_dir()
+        candidatos = sorted(raiz.rglob("*.md"))
     except OSError as exc:
-        raise ErrorMemoria(f"No se pudo acceder a la carpeta de memoria: {exc}") from exc
-    if not es_directorio:
-        raise ErrorMemoria(f"La carpeta de memoria no existe o no es un directorio: {raiz}")
+        raise ErrorMemoria(f"No se pudo recorrer la carpeta de memoria: {exc}") from exc
 
+    documentos: list[tuple[str, str]] = []
+    for ruta in candidatos:
+        ruta_segura = _resolver_seguro(raiz_resuelta, ruta)
+        if ruta_segura is None:
+            continue  # symlink escape: silently excluded
+        try:
+            if not ruta_segura.is_file():
+                continue
+            texto = ruta_segura.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        ruta_relativa = ruta_segura.relative_to(raiz_resuelta).as_posix()
+        documentos.append((ruta_relativa, _vista_previa(texto)))
+        if len(documentos) >= MAX_DOCUMENTOS_LISTADOS:
+            break
+
+    return documentos
+
+
+def nombres_conocidos(directorio: Optional[str] = None) -> list[str]:
+    """Folder/file names found under MEMORY_DIR, for use as transcription
+    `keyterms` (vocabulary hints) — schema-free: whatever names exist.
+    Total: returns `[]` on any failure, never raises."""
     try:
-        raiz_resuelta = raiz.resolve()
-    except OSError as exc:
-        raise ErrorMemoria(f"No se pudo resolver la carpeta de memoria: {exc}") from exc
-
-    ruta_indice = raiz / "MEMORY.md"
-    try:
-        existe_indice = ruta_indice.is_file()
-    except OSError as exc:
-        raise ErrorMemoria(f"No se pudo acceder a MEMORY.md: {exc}") from exc
-    if not existe_indice:
-        raise ErrorMemoria(f"No se encontró MEMORY.md en {raiz}")
-
-    try:
-        texto_indice = ruta_indice.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ErrorMemoria(f"No se pudo leer MEMORY.md: {exc}") from exc
-
-    indice = _parsear_indice(texto_indice)
-
-    carpeta_modulos = raiz / "modulos"
-    try:
-        hay_modulos = carpeta_modulos.is_dir()
-    except OSError as exc:
-        raise ErrorMemoria(f"No se pudo acceder a la carpeta modulos/: {exc}") from exc
-    if not hay_modulos:
+        documentos = listar_documentos(directorio)
+    except ErrorMemoria:
         return []
 
-    try:
-        entradas = sorted(carpeta_modulos.iterdir(), key=lambda p: p.name)
-    except OSError as exc:
-        raise ErrorMemoria(f"No se pudo leer la carpeta modulos/: {exc}") from exc
-
-    modulos: list[Modulo] = []
-    for entrada in entradas:
-        try:
-            if not entrada.is_dir():
-                continue
-        except OSError:
-            continue
-
-        carpeta = entrada.name
-        ruta_modulo = entrada / "_modulo.md"
-        ruta_modulo_segura = _resolver_seguro(raiz_resuelta, ruta_modulo)
-        if ruta_modulo_segura is None:
-            continue  # symlink escape or unreadable: silently rejected
-
-        try:
-            if not ruta_modulo_segura.is_file():
-                continue  # index entry with no _modulo.md: skipped
-        except OSError:
-            continue
-
-        nombre_indice, alias_indice, descripcion = indice.get(carpeta, (carpeta, (), ""))
-        carpeta_normalizada = re.sub(r"[_-]+", " ", carpeta).strip()
-        alias_completo = tuple(a for a in (carpeta_normalizada, *alias_indice) if a)
-
-        modulos.append(
-            Modulo(
-                nombre=nombre_indice,
-                alias=alias_completo,
-                descripcion=descripcion,
-                ruta=ruta_modulo_segura,
-            )
-        )
-
-    return modulos
-
-
-# --- Scoring -------------------------------------------------------------
-
-
-def _puntuar_modulo(modulo: Modulo, tokens_transcripcion: set[str]) -> float:
-    s_nombre = 0.0
-    for alias in modulo.alias:
-        tokens_alias = _tokenizar(alias)
-        if not tokens_alias:
-            continue
-        ratios = [
-            max(
-                (SequenceMatcher(None, ta, tt).ratio() for tt in tokens_transcripcion),
-                default=0.0,
-            )
-            for ta in tokens_alias
-        ]
-        r = sum(ratios) / len(ratios)
-        if r >= PISO_DIFUSO:
-            s_nombre = max(s_nombre, r)
-
-    tokens_descripcion = set(_tokenizar(modulo.descripcion))
-    comunes = len(tokens_descripcion & tokens_transcripcion)
-    s_desc = min(comunes, SATURACION_DESCRIPCION) / SATURACION_DESCRIPCION
-
-    return PESO_NOMBRE * s_nombre + PESO_DESCRIPCION * s_desc
-
-
-def puntuar(transcripcion: str, modulos: list[Modulo]) -> list[tuple[Modulo, float]]:
-    """Score every module against the transcript. Order matches `modulos`."""
-    tokens_transcripcion = set(_tokenizar(transcripcion))
-    return [(modulo, _puntuar_modulo(modulo, tokens_transcripcion)) for modulo in modulos]
+    vistos: set[str] = set()
+    nombres: list[str] = []
+    for ruta_relativa, _ in documentos:
+        for parte in Path(ruta_relativa).parts:
+            base = Path(parte).stem.replace("_", " ").replace("-", " ").strip()
+            clave = base.lower()
+            if base and clave not in vistos:
+                vistos.add(clave)
+                nombres.append(base)
+    return nombres
 
 
 # --- Health check ---------------------------------------------------------
@@ -255,27 +162,13 @@ def diagnosticar(directorio: Optional[str] = None) -> Optional[str]:
     """Return a Spanish non-blocking notice if the memory root is
     missing/unreadable, else `None`."""
     try:
-        cargar_modulos(directorio)
+        _verificar_directorio(resolver_directorio(directorio))
     except ErrorMemoria as exc:
         return (
-            "No se pudo cargar el contexto de módulos (memory/): "
+            "No se pudo acceder a la carpeta de memoria (memory/): "
             f"{exc}. La descripción se generará solo a partir de la transcripción."
         )
     return None
-
-
-def nombres_conocidos(directorio: Optional[str] = None) -> list[str]:
-    """Known module names/aliases, for use as transcription `keyterms`
-    (vocabulary hints). Total: returns `[]` on any failure, never raises."""
-    try:
-        modulos = cargar_modulos(directorio)
-    except ErrorMemoria:
-        return []
-    nombres: list[str] = []
-    for modulo in modulos:
-        nombres.append(modulo.nombre)
-        nombres.extend(modulo.alias)
-    return nombres
 
 
 # --- Budget / truncation ---------------------------------------------------
@@ -315,27 +208,118 @@ def _ensamblar_contexto(bloques: list[str], presupuesto: int) -> str:
     return separador.join(resultado)
 
 
+# --- Groq-assisted relevance selection --------------------------------------
+
+# Real corpora (e.g. the actual Kawak PHP docs, 273 files) can exceed
+# Groq's free-tier TPM limit for MODELO_SELECTOR in a single request
+# (confirmed live: gpt-oss-20b free tier is 8000 TPM; a 273-doc listing at
+# the old preview length needed ~14000). The listing is chunked into
+# batches so this scales to a corpus of any size, not just today's.
+CARACTERES_POR_LOTE = 12000
+
+
+def _construir_listado(documentos: list[tuple[str, str]]) -> str:
+    return "\n".join(f"- {ruta}: {vista_previa}" for ruta, vista_previa in documentos)
+
+
+def _lotes_de_documentos(
+    documentos: list[tuple[str, str]], presupuesto: int = CARACTERES_POR_LOTE
+):
+    """Yield successive batches of `documentos` whose formatted listing
+    stays within `presupuesto` characters each."""
+    lote: list[tuple[str, str]] = []
+    tamano = 0
+    for doc in documentos:
+        costo = len(doc[0]) + len(doc[1]) + 4  # "- {ruta}: {vista_previa}\n"
+        if lote and tamano + costo > presupuesto:
+            yield lote
+            lote, tamano = [], 0
+        lote.append(doc)
+        tamano += costo
+    if lote:
+        yield lote
+
+
+def elegir_documentos_relevantes(
+    transcripcion: str, documentos: list[tuple[str, str]], cliente
+) -> list[str]:
+    """Ask Groq which of `documentos` (if any) are relevant to `transcripcion`.
+
+    The listing is sent in budget-bounded batches (see `CARACTERES_POR_LOTE`)
+    — one Groq call per batch, stopping early once
+    `MAX_ARCHIVOS_SELECCIONADOS` is reached. Returns a list of chosen
+    `ruta_relativa` values, always a subset of `documentos`' own paths
+    (never trusts an unlisted path the model might invent). May raise —
+    callers must handle degradation.
+    """
+    if not documentos:
+        return []
+
+    from prompts import ENTRADA_SELECTOR_DOCUMENTOS, SELECTOR_DOCUMENTOS_RELEVANTES
+
+    rutas_validas = {ruta for ruta, _ in documentos}
+    seleccionados: list[str] = []
+
+    for lote in _lotes_de_documentos(documentos):
+        respuesta = cliente.chat.completions.create(
+            model=MODELO_SELECTOR,
+            messages=[
+                {"role": "system", "content": SELECTOR_DOCUMENTOS_RELEVANTES},
+                {
+                    "role": "user",
+                    "content": ENTRADA_SELECTOR_DOCUMENTOS.format(
+                        transcripcion=transcripcion,
+                        listado=_construir_listado(lote),
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=500,
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
+        )
+        datos = json.loads(respuesta.choices[0].message.content)
+        for ruta in datos.get("archivos", []):
+            if ruta in rutas_validas and ruta not in seleccionados:
+                seleccionados.append(ruta)
+
+        if len(seleccionados) >= MAX_ARCHIVOS_SELECCIONADOS:
+            break
+
+    return seleccionados[:MAX_ARCHIVOS_SELECCIONADOS]
+
+
 # --- Total provider ---------------------------------------------------------
 
 
-def buscar_contexto(transcripcion: str, *, directorio: Optional[str] = None) -> str:
-    """Total provider: returns bounded module context, or `""`. Never raises."""
+def buscar_contexto(
+    transcripcion: str, *, directorio: Optional[str] = None, cliente=None
+) -> str:
+    """Total provider: returns bounded document context, or `""`. Never raises.
+
+    `cliente` is injected for testing; when None, resolves lazily to
+    `generar_descripcion._crear_cliente()` (same lazy-fail-on-missing-key
+    behavior as the generation client).
+    """
     try:
-        modulos = cargar_modulos(directorio)
-        if not modulos:
+        documentos = listar_documentos(directorio)
+        if not documentos:
             return ""
 
-        puntuados = puntuar(transcripcion, modulos)
-        calificados = [(m, s) for m, s in puntuados if s >= UMBRAL]
-        calificados.sort(key=lambda par: (-par[1], par[0].nombre))
-        seleccionados = calificados[:TOP_N]
+        if cliente is None:
+            from generar_descripcion import _crear_cliente
+
+            cliente = _crear_cliente()
+
+        seleccionados = elegir_documentos_relevantes(transcripcion, documentos, cliente)
         if not seleccionados:
             return ""
 
+        raiz = resolver_directorio(directorio)
         bloques = []
-        for modulo, _ in seleccionados:
+        for ruta_relativa in seleccionados:
             try:
-                bloques.append(modulo.ruta.read_text(encoding="utf-8"))
+                bloques.append((raiz / ruta_relativa).read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
 

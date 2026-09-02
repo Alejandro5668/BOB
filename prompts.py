@@ -34,7 +34,7 @@ Reglas obligatorias:
 4. PROHIBIDO rellenar una sección omitida con «no especificado», «no aplica», «sin datos», «pendiente», guiones o cualquier otro marcador de posición: la sección simplemente no aparece.
 5. PROHIBIDO inventar un resultado esperado. Si el analista no dijo explícitamente qué esperaba que ocurriera, la sección `## Resultado esperado vs. obtenido` NO EXISTE en tu respuesta. No la deduzcas de lo que el sistema «debería» hacer, ni escribas expectativas genéricas del tipo «se esperaba que funcionara correctamente».
 6. Si no puedes identificar el módulo afectado, escribe exactamente `Módulo afectado: no identificado` como cuerpo de la primera sección. Nunca omitas esa sección ni inventes un nombre de módulo.
-7. Usa lenguaje llano, comprensible para una persona no técnica.
+7. Usa lenguaje llano, comprensible para una persona no técnica, en español neutro (sin voseo ni otros regionalismos).
 8. Usa ÚNICAMENTE la información presente en la transcripción. No inventes datos.
 9. PROHIBIDO mencionar o suponer detalles de implementación (nombres de clases, funciones, métodos, tablas, endpoints, consultas SQL) que no aparezcan literalmente en la transcripción.
 10. PROHIBIDO diagnosticar la causa técnica. Describe solo el comportamiento observado: qué hacía la persona, qué esperaba y qué ocurrió.
@@ -76,3 +76,46 @@ Transcripción del analista:
 Redacta la descripción con la plantilla indicada. Los hechos salen solo de la transcripción; el contexto solo sirve para nombrar el módulo afectado. Omite por completo las secciones opcionales que el analista no haya mencionado."""
 """Plantilla del mensaje de usuario con contexto de módulo: bloque de contexto
 delimitado por `===`, seguido de la transcripción delimitada por `---`."""
+
+SELECTOR_DOCUMENTOS_RELEVANTES = """Elegís qué documentación interna puede ayudar a redactar un ticket a partir de lo que reportó un cliente. Se te da una transcripción y una lista de archivos disponibles (ruta y una vista previa breve de cada uno). La documentación no tiene una estructura fija — puede ser cualquier tipo de archivo Markdown de cualquier proyecto.
+
+Elegí como máximo 3 archivos cuyo contenido probablemente ayude a ubicar o entender el problema descrito. Si ninguno parece relevante, elegí ninguno — no adivines por descarte.
+
+Respondé ÚNICAMENTE un JSON con este formato exacto, sin texto adicional ni bloque de código:
+{"archivos": ["ruta/al/archivo1.md"]}
+
+Si ninguno es relevante:
+{"archivos": []}"""
+"""Prompt de sistema para elegir, entre los archivos .md disponibles bajo
+MEMORY_DIR (sin asumir ninguna estructura de carpetas), cuáles inyectar
+como contexto — reemplaza el scoring léxico fijo por juicio del modelo."""
+
+ENTRADA_SELECTOR_DOCUMENTOS = """Transcripción del analista:
+---
+{transcripcion}
+---
+Archivos disponibles:
+{listado}"""
+"""Mensaje de usuario para SELECTOR_DOCUMENTOS_RELEVANTES: transcripción +
+listado "- ruta: vista previa" de cada archivo .md encontrado."""
+
+VERIFICADOR_RESULTADO_ESPERADO = """Evaluás si un texto de "resultado esperado" está respaldado explícitamente por una transcripción, o si es una expectativa inventada/genérica que nadie dijo.
+
+Respondé ÚNICAMENTE un JSON con este formato exacto, sin texto adicional:
+{"fundamentado": true}
+o
+{"fundamentado": false}"""
+"""Prompt de sistema para el chequeo anti-invención de la sección
+"Resultado esperado vs. obtenido" — reemplaza la lista fija de frases
+genéricas (FRASES_GENERICAS) por un juicio del modelo caso por caso."""
+
+ENTRADA_VERIFICADOR_RESULTADO_ESPERADO = """Transcripción del analista:
+---
+{transcripcion}
+---
+Texto de "resultado esperado" a evaluar:
+---
+{cuerpo}
+---
+¿Está fundamentado explícitamente en la transcripción?"""
+"""Mensaje de usuario para VERIFICADOR_RESULTADO_ESPERADO."""
