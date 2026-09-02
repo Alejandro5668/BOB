@@ -17,6 +17,35 @@ stepping on each other's work. Stack-specific rules belong in a nested
 
 ---
 
+## Project setup (mandatory — read before improvising)
+
+When asked to set up, start, "levantar", refresh, or verify the running
+app is up to date — run:
+
+```bash
+./scripts/setup.sh
+```
+
+Idempotent, safe to re-run any time, including right after a merge. It
+always rebuilds the Docker image and recreates the container from
+scratch, so it can never silently keep serving a stale build.
+
+**Why this is mandatory, not a suggestion:** this bit the project once —
+a container sat running pre-migration code for 4 hours after a merge
+because nobody rebuilt it, and a manual `streamlit run app.py` bypassed
+Docker entirely and picked up the wrong `MEMORY_DIR` (the dev fixture
+instead of the real docs folder mounted via
+`docker-compose.override.yml`). Don't improvise a bare `streamlit run`
+or a manual `docker compose up`/`build` sequence — use the script, so
+every session (human or AI) gets the same guaranteed-fresh result.
+
+If `.env` doesn't exist yet, the script creates it from `.env.example`
+and prints which keys need to be filled in by hand (`ANTHROPIC_API_KEY`,
+`ELEVENLABS_API_KEY`) — editing `.env*` itself remains a manual,
+operator-owned step, never an AI-session action.
+
+---
+
 ## Decision persistence rule (mandatory)
 
 Any AI session's memory/continuity tooling is typically **local to each
