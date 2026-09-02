@@ -1,65 +1,43 @@
 # Context Retrieval Specification
 
-> **STALE — out of sync with the implementation.** This spec still
-> describes the original fixed-schema (`MEMORY.md` index + lexical
-> scoring) design from Fase 2. It was replaced by a schema-free,
-> Groq-assisted selection design implemented directly (outside the SDD
-> cycle) — see `CLAUDE.md` "Context retrieval decision" and the real
-> `contexto_memoria.py` for current behavior. This file needs a proper
-> spec-delta pass to catch up; do not treat it as authoritative.
-
 ## Purpose
 
 Locates and scores Kawak modules documented under `memory/` against the approved transcript, and returns bounded, literal context for the top matching module(s) — or nothing when no module clears the confidence threshold. Retrieval is invisible to the analyst during normal operation and degrades gracefully when `memory/` is absent or unreadable.
 
 ## Requirements
 
-### Requirement: Module Scoring Against Transcript
+### Requirement: Schema-Free Discovery and Groq-Assisted Selection
 
-The system MUST score each module under `MEMORY_DIR/modulos/*` against the transcript by combining fuzzy matching on the module's folder name/aliases with normalized token overlap against that module's `MEMORY.md` prose description (case/accent-insensitive, stopword-filtered).
+The system MUST discover every `.md` file anywhere under `MEMORY_DIR`, regardless of folder layout, and MUST NOT require any fixed index file or per-module naming convention. The system MUST send a lightweight preview listing of candidate documents to Groq and MUST select only paths Groq returned that were actually present in that listing, capped at a fixed maximum count.
 
-#### Scenario: Transcript names a module in plain language
-- GIVEN a transcript containing "el módulo donde se ven los riesgos"
-- WHEN the system scores modules
-- THEN the module documenting risk-related behavior MUST receive the highest score
+#### Scenario: Flat or nested corpus discovered without a fixed schema
+- GIVEN `MEMORY_DIR` contains `.md` files in an arbitrary folder layout with no index file
+- WHEN discovery runs
+- THEN every `.md` file MUST be found as a candidate regardless of its folder depth or naming convention
 
-#### Scenario: Transcript has no recognizable module reference
-- GIVEN a transcript with no wording matching any module's name, aliases, or description
-- WHEN the system scores modules
-- THEN every module MUST score below the configured threshold
+#### Scenario: Model never invents a path
+- GIVEN Groq's selection response names a path not present in the listing
+- WHEN the system reads that response
+- THEN the invented path MUST be discarded and MUST NOT appear in the final selection
 
-### Requirement: Top-N Threshold-Based Injection
+### Requirement: Enriched-or-Raw Context Block Assembly
 
-The system MUST rank modules by score and inject the top-N modules whose score clears the configured threshold. When more than one module clears the threshold, all qualifying modules up to N MUST be injected together — this MUST NOT be treated as a no-match/ambiguous case.
+When assembling context for the final-selected documents, the system MUST use each document's enriched functional summary when one is available and MUST fall back to that document's verbatim raw content otherwise. The system MUST preserve selection order when building blocks and MUST still enforce the existing character budget and deterministic truncation across the assembled blocks.
 
-#### Scenario: Single module clears threshold
-- GIVEN exactly one module scores above threshold
-- WHEN retrieval completes
-- THEN only that module's context MUST be returned
+#### Scenario: Enriched summary available
+- GIVEN a selected document has a valid enriched summary
+- WHEN the context block for that document is assembled
+- THEN the block MUST contain the enriched summary, not the raw file content
 
-#### Scenario: Multiple modules clear threshold
-- GIVEN two or more modules score above threshold
-- WHEN retrieval completes
-- THEN the top-N qualifying modules MUST all be returned together as context
+#### Scenario: Enrichment unavailable for a document
+- GIVEN a selected document's enrichment failed or was never produced
+- WHEN the context block for that document is assembled
+- THEN the block MUST contain that document's verbatim raw content
 
-#### Scenario: No module clears threshold
-- GIVEN every module scores below threshold
-- WHEN retrieval completes
-- THEN no context MUST be returned, and the subsequent Groq request MUST be byte-identical to Fase 1 behavior
-
-### Requirement: Module Context Scope Restricted to `_modulo.md`
-
-For each injected module, the system MUST include only that module's `_modulo.md` content. It MUST NOT include `core/`, `errores_comunes.md`, `decisiones_tecnicas.md`, or raw `MEMORY.md` content in the injected context.
-
-#### Scenario: Matched module context includes only `_modulo.md`
-- GIVEN a module cleared threshold
-- WHEN its context is assembled
-- THEN the assembled context MUST equal that module's `_modulo.md` content only
-
-#### Scenario: Shared files never leak into injected context
-- GIVEN retrieval ran successfully
-- WHEN the injected context is inspected
-- THEN it MUST NOT contain any content from `core/`, `errores_comunes.md`, `decisiones_tecnicas.md`, or `MEMORY.md`
+#### Scenario: Budget still enforced over enriched blocks
+- GIVEN the concatenated enriched-or-raw blocks of the selected documents exceed the configured character budget
+- WHEN context is assembled
+- THEN the system MUST truncate deterministically to fit within budget, exactly as it does today for raw blocks
 
 ### Requirement: Bounded Context Size
 

@@ -11,6 +11,7 @@ services:
         required: false
     volumes:
       - ./logs:/app/logs
+      - ./cache/documentacion:/app/cache/documentacion
     healthcheck:
       test:
         - CMD

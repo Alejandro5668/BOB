@@ -1,0 +1,14 @@
+change: enriquecimiento-documentacion-haiku
+artifact_store: hybrid
+delivery_strategy: size:exception (single-pr, ~530 lines, accepted by user over 400 budget)
+review_budget_lines: 400
+phases:
+  explore: done
+  proposal: done
+  spec: done
+  design: done
+  tasks: done
+  apply: partial (22/26 automated done, 99/99 tests passing; 4 manual tasks: .env.example blocked by permission guardrail, 3 need real ANTHROPIC_API_KEY/Docker runtime)
+  verify: done (pass with warnings, 0 critical)
+  archive: pending
+next_recommended: sdd-archive

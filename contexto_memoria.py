@@ -15,6 +15,13 @@ leaning on the model's judgment rather than a fixed matching algorithm.
 Never imports Streamlit (see spec "Standalone Testable Module"). Never
 writes, creates, or deletes anything under `MEMORY_DIR`: only `is_dir`,
 `is_file`, `rglob`, `resolve`, and `read_text` are used.
+
+The raw content of the finally-selected documents is passed through
+`contexto_enriquecido.enriquecer_documentos` before assembly, turning each
+developer-oriented `.md` into a short functional summary for the analyst
+(see `contexto_enriquecido.py`). Enrichment is total and degrades to the
+verbatim raw content on any failure — it never blocks or empties this
+module's own total-provider contract.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ LONGITUD_VISTA_PREVIA = 160
 MODELO_SELECTOR = "openai/gpt-oss-20b"  # cheaper/faster than the generation model
 
 ProveedorContexto = Callable[[str], str]
+Enriquecedor = Callable[[list[tuple[str, str]]], list[str]]
 
 
 class ErrorMemoria(RuntimeError):
@@ -310,13 +318,25 @@ def elegir_documentos_relevantes(
 
 
 def buscar_contexto(
-    transcripcion: str, *, directorio: Optional[str] = None, cliente=None
+    transcripcion: str,
+    *,
+    directorio: Optional[str] = None,
+    cliente=None,
+    enriquecedor: Optional[Enriquecedor] = None,
 ) -> str:
     """Total provider: returns bounded document context, or `""`. Never raises.
 
     `cliente` is injected for testing; when None, resolves lazily to
     `generar_descripcion._crear_cliente()` (same lazy-fail-on-missing-key
     behavior as the generation client).
+
+    `enriquecedor` is injected for testing; when None, resolves lazily to
+    `contexto_enriquecido.enriquecer_documentos` (a total function that
+    degrades to raw content on any failure — see that module). The
+    enricher receives `(ruta_relativa, contenido_crudo)` pairs in selection
+    order and must return one block per input, same order; a broken or
+    injected enricher that violates that contract degrades this call to
+    the raw blocks instead, never to `""`.
     """
     try:
         documentos = listar_documentos(directorio)
@@ -333,15 +353,34 @@ def buscar_contexto(
             return ""
 
         raiz = resolver_directorio(directorio)
-        bloques = []
+        pares: list[tuple[str, str]] = []
         for ruta_relativa in seleccionados:
             try:
-                bloques.append((raiz / ruta_relativa).read_text(encoding="utf-8", errors="replace"))
+                contenido = (raiz / ruta_relativa).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            pares.append((ruta_relativa, contenido))
 
-        if not bloques:
+        if not pares:
             return ""
+
+        if enriquecedor is None:
+            from contexto_enriquecido import enriquecer_documentos as enriquecedor
+
+        # Defense in depth: `enriquecer_documentos` is total by contract, but a
+        # broken/injected enricher must degrade to raw blocks, never to "".
+        try:
+            bloques = enriquecedor(pares)
+            if len(bloques) != len(pares):
+                raise ValueError(
+                    f"El enriquecedor devolvió {len(bloques)} bloques para {len(pares)} documentos"
+                )
+        except Exception as exc:
+            logger.warning(
+                "Enriquecimiento no utilizable, se usa documentación cruda: %s: %s",
+                type(exc).__name__, exc,
+            )
+            bloques = [contenido for _, contenido in pares]
 
         return _ensamblar_contexto(bloques, PRESUPUESTO_CARACTERES)
     except Exception as exc:

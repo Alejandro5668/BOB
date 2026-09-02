@@ -14,6 +14,16 @@ import pytest
 import contexto_memoria as cm
 
 
+@pytest.fixture(autouse=True)
+def _sin_clave_anthropic(monkeypatch):
+    """Belt-and-braces guard: no test in this file should ever be able to
+    reach the real Anthropic network, even if `buscar_contexto`'s default
+    lazy enricher import is exercised by accident (every test here injects
+    `cliente=`, and enrichment tests inject `enriquecedor=` too, but this
+    stays as a second line of defense — no conftest.py exists in this repo)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
 class FakeMessage:
     def __init__(self, content):
         self.content = content
@@ -334,16 +344,53 @@ def test_buscar_contexto_empty_when_selector_picks_nothing(tmp_path):
     assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
 
 
-def test_buscar_contexto_returns_selected_file_content_verbatim(tmp_path):
+def test_buscar_contexto_uses_enriched_summary_instead_of_raw_content(tmp_path):
     raiz = _crear_arbol(
         tmp_path / "memory",
         {"riesgos/index.md": "Documentación real de riesgos.", "otro.md": "irrelevante"},
     )
     cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
+    recibidos = []
 
-    contexto = cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente)
+    def enriquecedor(pares):
+        recibidos.extend(pares)
+        return [f"RESUMEN de {ruta}" for ruta, _ in pares]
 
-    assert contexto == "Documentación real de riesgos."
+    contexto = cm.buscar_contexto(
+        "transcripción", directorio=str(raiz), cliente=cliente, enriquecedor=enriquecedor
+    )
+
+    assert contexto == "RESUMEN de riesgos/index.md"
+    # The enricher receives (ruta_relativa, contenido_crudo) pairs in selection order.
+    assert recibidos == [("riesgos/index.md", "Documentación real de riesgos.")]
+
+
+def test_buscar_contexto_falls_back_to_raw_content_when_enricher_fails(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"riesgos/index.md": "Documentación real de riesgos."})
+    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
+
+    def enriquecedor(pares):
+        raise RuntimeError("fallo simulado de enriquecimiento")
+
+    contexto = cm.buscar_contexto(
+        "transcripción", directorio=str(raiz), cliente=cliente, enriquecedor=enriquecedor
+    )
+
+    assert contexto == "Documentación real de riesgos."  # degrades to raw, never to ""
+
+
+def test_buscar_contexto_falls_back_to_raw_content_on_enricher_length_mismatch(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"riesgos/index.md": "Documentación real de riesgos."})
+    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
+
+    contexto = cm.buscar_contexto(
+        "transcripción",
+        directorio=str(raiz),
+        cliente=cliente,
+        enriquecedor=lambda pares: [],
+    )
+
+    assert contexto == "Documentación real de riesgos."  # never ""
 
 
 def test_buscar_contexto_degrades_to_empty_on_missing_directory():

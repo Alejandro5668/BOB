@@ -19,6 +19,7 @@ scripts/
 CLAUDE.md
 README.md
 *.wav
+cache/
 *.mp3
 *.m4a
 *.ogg
