@@ -37,7 +37,7 @@ Reglas obligatorias:
 3. `## Contexto del módulo`, `## Pasos para reproducir` y `## Resultado esperado vs. obtenido` son opcionales: si no hay documentación de contexto que aporte algo útil, o el analista no narró los pasos, o no dijo qué esperaba, ELIMINA de la respuesta ese encabezado Y su contenido.
 4. PROHIBIDO rellenar una sección omitida con «no especificado», «no aplica», «sin datos», «pendiente», guiones o cualquier otro marcador de posición: la sección simplemente no aparece.
 5. PROHIBIDO inventar un resultado esperado. Si el analista no dijo explícitamente qué esperaba que ocurriera, la sección `## Resultado esperado vs. obtenido` NO EXISTE en tu respuesta. No la deduzcas de lo que el sistema «debería» hacer, ni escribas expectativas genéricas del tipo «se esperaba que funcionara correctamente».
-6. Si no puedes identificar el módulo afectado, escribe exactamente `Módulo afectado: no identificado` como cuerpo de la primera sección. Nunca omitas esa sección ni inventes un nombre de módulo.
+6. Si no puedes identificar el módulo afectado, escribe exactamente `Módulo afectado: no identificado` como cuerpo de la primera sección. Nunca omitas esa sección ni inventes un nombre de módulo: si el analista nombró la pantalla, opción o funcionalidad en la transcripción, usa EXACTAMENTE esas palabras — nunca las reemplaces por un nombre distinto que te suene más natural o más genérico.
 7. Usa lenguaje llano, comprensible para una persona no técnica, en español neutro (sin voseo ni otros regionalismos).
 8. Usa ÚNICAMENTE la información presente en la transcripción. No inventes datos.
 9. PROHIBIDO mencionar o suponer detalles de implementación (nombres de clases, funciones, métodos, tablas, endpoints, consultas SQL) que no aparezcan literalmente en la transcripción.
@@ -49,12 +49,12 @@ Markdown fija (rules 1-12), sin contexto de módulo recuperado."""
 
 REGLAS_CONTEXTO_MODULO = """Reglas adicionales para el bloque "Contexto de módulo":
 13. El contexto es documentación interna de referencia. Úsalo para nombrar correctamente el módulo afectado en `## Módulo afectado`, para usar su vocabulario documentado, y para poblar `## Contexto del módulo` (ver regla 15).
-14. Si el contexto documenta submódulos, pantallas o secciones dentro del módulo, nombra en `## Módulo afectado` el más específico que concuerde con la transcripción, con el formato `Módulo > Submódulo`. Si ninguno concuerda, nombra solo el módulo.
+14. Si el contexto documenta submódulos, pantallas o secciones dentro del módulo, nombra en `## Módulo afectado` el más específico que concuerde con la transcripción, con el formato `Módulo > Submódulo`, usando el nombre EXACTO que aparece en la transcripción o, si el analista no lo nombró, el nombre literal que aparece en el contexto — nunca un nombre distinto inventado o parafraseado. Si ninguno concuerda, nombra solo el módulo.
 15. Si el contexto documenta el propósito, la pantalla o el comportamiento normal de lo involucrado, resumilo en 2-4 líneas propias en `## Contexto del módulo` — es la ÚNICA sección donde podés describir funcionalidad general del módulo. Sacale el jugo a la documentación ahí: qué hace esa pantalla/función, para qué sirve, cómo se comporta normalmente. En `## Qué pasó` seguís describiendo solo lo que dijo el analista — nunca mezcles el comportamiento documentado con los hechos del incidente.
 16. La transcripción es la única fuente de los hechos del incidente. PROHIBIDO presentar contenido del contexto como algo que ocurrió, se observó o se hizo — eso solo puede ir en `## Contexto del módulo`, nunca en `## Qué pasó`, `## Pasos para reproducir` ni `## Resultado esperado vs. obtenido`.
 17. PROHIBIDO afirmar o insinuar cualquier cosa sobre el módulo (en cualquier sección) que no aparezca literalmente en el bloque de contexto.
 18. Si el contexto no concuerda con lo narrado en la transcripción, IGNÓRALO por completo: no lo uses ni para nombrar el módulo ni para `## Contexto del módulo`; si así no puedes nombrar el módulo, escribe `Módulo afectado: no identificado`.
-19. PROHIBIDO copiar frases literales del contexto (parafraseá siempre), mencionar que existe un contexto o documentación, o usar el contexto para inventar pasos de reproducción o un resultado esperado — esos dos salen únicamente de la transcripción."""
+19. En `## Contexto del módulo`, parafraseá siempre la explicación funcional: PROHIBIDO copiar frases completas del contexto, o mencionar que existe un contexto o documentación. Excepción: los nombres propios de módulos, pantallas, opciones o funcionalidades (regla 14) se citan literales, nunca se parafrasean. PROHIBIDO usar el contexto para inventar pasos de reproducción o un resultado esperado — esos dos salen únicamente de la transcripción."""
 """Reglas 13-19: extienden GENERADOR_DESCRIPCION_TICKET cuando hay contexto de
 módulo recuperado. Nunca se usan solas — siempre concatenadas a la base. Regla
 15 es la única vía permitida para describir funcionalidad del módulo usando el
@@ -130,6 +130,34 @@ Texto de "resultado esperado" a evaluar:
 ¿Está fundamentado explícitamente en la transcripción?"""
 """Mensaje de usuario para VERIFICADOR_RESULTADO_ESPERADO."""
 
+VERIFICADOR_MODULO_AFECTADO = """Evaluás si el nombre de un módulo, pantalla o funcionalidad citado en una respuesta es una cita literal (tolerando mayúsculas/minúsculas y tildes) de una fuente, o un nombre inventado/parafraseado que no aparece tal cual en esa fuente.
+
+Respondé ÚNICAMENTE un JSON con este formato exacto, sin texto adicional:
+{"citado_literalmente": true}
+o
+{"citado_literalmente": false}"""
+"""Prompt de sistema para el chequeo anti-invención del nombre citado en
+'## Módulo afectado' — mismo patrón que VERIFICADOR_RESULTADO_ESPERADO,
+pero verifica el nombre en vez de la expectativa. Solo se invoca cuando
+hubo contexto de módulo recuperado (ver `generar_descripcion.postprocesar_descripcion`):
+ese es exactamente el escenario donde el modelo puede reemplazar un nombre
+real (dicho por el analista o presente en la documentación) por uno
+parafraseado que le suene más natural — el caso real que motivó este
+chequeo: "listado único de documentos" (dicho por el analista y presente
+en la documentación) reemplazado por "edición masiva de documentos"
+(inventado)."""
+
+ENTRADA_VERIFICADOR_MODULO_AFECTADO = """Fuente (transcripción del analista + documentación de contexto):
+---
+{fuente}
+---
+Nombre citado a evaluar:
+---
+{modulo}
+---
+¿Es una cita literal (aparece tal cual, salvo mayúsculas/tildes) de la fuente?"""
+"""Mensaje de usuario para VERIFICADOR_MODULO_AFECTADO."""
+
 PREFILL_RESPONDEDOR_CONSULTA = "[TIPO:"
 """Prefill del turno de asistente para RESPONDEDOR_CONSULTA_DOCUMENTACION.
 
@@ -159,6 +187,7 @@ Cuándo pedir aclaración:
 Cómo responder:
 
 - Analizá el contexto y explicá con tus propias palabras lo que encontraste; no lo copies ni lo resumas de forma genérica.
+- Para nombrar módulos, pantallas, opciones o funcionalidades, usá EXACTAMENTE los términos que usó el analista en la pregunta o los que aparezcan literalmente en el contexto — nunca inventes ni parafrasees un nombre distinto que te suene más natural.
 - Si el contexto resuelve solo una parte de la pregunta, respondé esa parte y decí explícitamente cuál queda sin confirmar. No presentes todo con la misma seguridad.
 - Si el comportamiento cambia según el módulo o la configuración, decilo y describí las variantes que aparecen en el contexto. Nunca elijas una sola en silencio como si aplicara siempre.
 - Si el contexto directamente no cubre la pregunta, decí que la documentación disponible no lo explica y qué haría falta para responderla. No uses la frase "No se encontró información sobre esto en la documentación disponible.": esa frase está reservada para cuando no se recuperó ningún documento, y repetirla acá borraría la diferencia entre los dos casos.

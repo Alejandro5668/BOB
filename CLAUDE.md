@@ -205,20 +205,63 @@ model with JSON mode must account for this — don't reintroduce a small
 
 `generar_descripcion.py`'s "Resultado esperado vs. obtenido" defense-in-depth
 no longer matches the model's output against a fixed blocklist of ~57
-generic phrases — it asks Groq itself (`MODELO_AUXILIAR`, same
-`openai/gpt-oss-20b`) whether the stated expectation is explicitly
+generic phrases — it asks Claude Haiku 4.5 itself (`MODELO_AUXILIAR`, same
+model as generation) whether the stated expectation is explicitly
 grounded in the transcript, replacing the section with a fixed notice
 only when the model says it isn't.
 
 **Why:** the user explicitly distrusted the fixed-phrase-array approach
 ("no me convencen del todo, prefiero algo más útil, más funcional") — a
 static list can never cover every way of phrasing an invented
-expectation. Same `reasoning_effort`/`max_tokens` gotcha applies here.
+expectation.
 
 **Failure policy:** if the verifier call itself fails (network error,
 malformed JSON), default to `True` (assume grounded, keep the model's
 original text) — a broken verifier must never silently erase real
 analyst-provided content.
+
+### Guardrails catalog (RAG anti-hallucination rules)
+
+Every rule below exists to keep a response tied to what the analyst
+actually said or what the retrieved documentation actually contains —
+never to what the model thinks is plausible. Two enforcement tiers exist,
+and the table says which one covers each rule:
+
+- **Prompt-only**: an instruction in the system prompt (`prompts.py`). Cheap,
+  but nothing double-checks the model actually followed it.
+- **Prompt + verifier**: the prompt rule PLUS a second, cheap Haiku call
+  (`_pedir_json`-based, same pattern for all of them) that audits the
+  specific claim after generation and degrades to a safe fixed fallback if
+  it isn't grounded. This is strictly stronger — it's what catches the
+  model breaking its own prompt rule.
+
+| Guardrail | Rule(s) | Tier | Where |
+|---|---|---|---|
+| No inventing incident facts beyond the transcript | 8, 16, 17 | Prompt-only | `GENERADOR_DESCRIPCION_TICKET`/`REGLAS_CONTEXTO_MODULO` |
+| No implementation detail (classes, tables, endpoints) | 9 | Prompt-only | `GENERADOR_DESCRIPCION_TICKET`, `RESPONDEDOR_CONSULTA_DOCUMENTACION` |
+| No technical-cause diagnosis | 10 | Prompt-only | `GENERADOR_DESCRIPCION_TICKET` |
+| No filler placeholders in omitted sections | 3, 4 | Prompt-only | `GENERADOR_DESCRIPCION_TICKET` |
+| Module/screen/functionality names must be quoted literally, never paraphrased | 6, 14, 19 | **Prompt + verifier** | `_verificar_modulo_afectado` (`generar_descripcion.py`), only runs when context was retrieved |
+| "Resultado esperado" must be grounded in the transcript | 5 | **Prompt + verifier** | `_verificar_resultado_esperado` (`generar_descripcion.py`) |
+| Q&A: module/screen names must be quoted literally | (Q&A prompt) | Prompt-only | `RESPONDEDOR_CONSULTA_DOCUMENTACION` — no verifier yet (see below) |
+| Q&A: no-information notice reserved for zero-context case | (Q&A prompt) | Prompt-only + code-level (`TIPO_SIN_INFORMACION`) | `consultar_documentacion.py` |
+| Selected document paths never invented | (retrieval) | **Code-level** (stronger than a verifier: never trusts a path the model didn't actually list) | `elegir_documentos_relevantes` (`contexto_memoria.py`) |
+
+**Why module naming got a verifier and Q&A didn't (yet):** a real failure
+motivated this — the analyst said "listado único de documentos" (also
+present in the retrieved documentation verbatim) and the model still wrote
+"edición masiva de documentos" in `## Módulo afectado`, an invented name.
+The ticket template has one fixed, always-present section for this
+(`## Módulo afectado`), so a verifier can extract and check it precisely.
+The Q&A mode's answer is free-form prose with no fixed extraction point —
+adding an equally precise verifier there would need a different mechanism
+(candidate-name extraction first), which is a real "no sobreingeniería"
+tradeoff: documented here as a known gap, not silently ignored.
+
+**Failure policy for every verifier above:** never raises, defaults to
+keeping the model's original claim on any failure (network error,
+malformed JSON) — a broken verifier must never erase real content, only
+a confirmed "not grounded" verdict triggers the fallback.
 
 ---
 

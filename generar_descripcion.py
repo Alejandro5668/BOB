@@ -61,7 +61,10 @@ MODELO_AUXILIAR = MODELO_HAIKU  # same model id; kept as a distinct public kwarg
 
 ProveedorContexto = Callable[[str], str]
 
-# --- Post-processor: heading + fixed notice ------------------------------
+# --- Post-processor: headings + fixed notices ----------------------------
+
+ENCABEZADO_MODULO = "## Módulo afectado"
+MODULO_NO_IDENTIFICADO = "Módulo afectado: no identificado"
 
 ENCABEZADO_RESULTADO = "## Resultado esperado vs. obtenido"
 AVISO_RESULTADO_NO_CONFIABLE = (
@@ -76,7 +79,40 @@ class ErrorGeneracion(RuntimeError):
     """Raised on Anthropic SDK auth/API failures. Never includes the key value."""
 
 
-# --- Post-processor: fence-strip (pure) + Haiku-judged grounding check ----
+# --- Post-processor: section location/replacement (pure) ------------------
+
+
+def _ubicar_seccion(lineas: list[str], encabezado: str) -> Optional[tuple[int, int]]:
+    """Find `encabezado` in `lineas`; return (heading_index, body_end_index),
+    where body_end_index is the next `## `-heading line or len(lineas) if
+    this is the last section. None if `encabezado` isn't present."""
+    indice = None
+    for i, linea in enumerate(lineas):
+        if linea.strip().rstrip(":") == encabezado:
+            indice = i
+            break
+    if indice is None:
+        return None
+
+    fin = len(lineas)
+    for j in range(indice + 1, len(lineas)):
+        if lineas[j].startswith("## "):
+            fin = j
+            break
+    return indice, fin
+
+
+def _reemplazar_cuerpo(lineas: list[str], indice_encabezado: int, fin_cuerpo: int, nuevo_cuerpo: str) -> list[str]:
+    """Replace the body between `indice_encabezado` and `fin_cuerpo` with
+    `nuevo_cuerpo` (a single fixed-notice line), preserving a blank
+    separator line before whatever section (if any) comes after."""
+    reemplazo = [nuevo_cuerpo]
+    if fin_cuerpo < len(lineas):
+        reemplazo.append("")
+    return lineas[: indice_encabezado + 1] + reemplazo + lineas[fin_cuerpo:]
+
+
+# --- Post-processor: Haiku-judged grounding checks -------------------------
 
 
 def _verificar_resultado_esperado(transcripcion: str, cuerpo: str, cliente) -> bool:
@@ -111,15 +147,52 @@ def _verificar_resultado_esperado(transcripcion: str, cuerpo: str, cliente) -> b
         return True
 
 
-def postprocesar_descripcion(texto: str, transcripcion: str, cliente) -> str:
+def _verificar_modulo_afectado(fuente: str, modulo: str, cliente) -> bool:
+    """Ask Claude Haiku 4.5 whether `modulo` is a literal quote (module/
+    screen/functionality name) from `fuente` (transcript + retrieved
+    context), or an invented/paraphrased name nobody actually used.
+
+    Defaults to True (assume grounded, keep the text) on any failure — same
+    fail-open policy as `_verificar_resultado_esperado`. Never raises.
+    """
+    from prompts import ENTRADA_VERIFICADOR_MODULO_AFECTADO, VERIFICADOR_MODULO_AFECTADO
+
+    try:
+        datos = _pedir_json(
+            cliente,
+            model=MODELO_AUXILIAR,
+            system=VERIFICADOR_MODULO_AFECTADO,
+            mensaje_usuario=ENTRADA_VERIFICADOR_MODULO_AFECTADO.format(fuente=fuente, modulo=modulo),
+            max_tokens=150,
+        )
+        return bool(datos.get("citado_literalmente", True))
+    except Exception as exc:
+        logger.warning(
+            "Verificación de 'Módulo afectado' falló, se conserva el texto: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return True
+
+
+def postprocesar_descripcion(texto: str, transcripcion: str, cliente, contexto: str = "") -> str:
     """Best-effort defense-in-depth over the raw model response: strips a
-    whole-output code fence, and — when a "Resultado esperado vs. obtenido"
-    section is present — asks Claude Haiku 4.5 itself whether it's grounded
-    in `transcripcion`; if not, replaces it with a fixed notice.
+    whole-output code fence; when `contexto` was retrieved, asks Claude
+    Haiku 4.5 whether the cited `## Módulo afectado` name is a literal quote
+    from the transcript+context (if not, falls back to
+    `MODULO_NO_IDENTIFICADO`); and — when a "Resultado esperado vs. obtenido"
+    section is present — asks whether it's grounded in `transcripcion` (if
+    not, replaces it with a fixed notice).
+
+    The módulo check only runs when `contexto` is non-empty: without
+    retrieved context the model has only the transcript's own wording to
+    draw from (rule 6 already covers that at the prompt level), and this is
+    exactly the scenario that caused a real invented name ("edición masiva
+    de documentos" replacing the analyst's own "listado único de
+    documentos") to slip through despite the prompt rule.
 
     Never raises. Runs OUTSIDE the try/except that maps Anthropic SDK
     failures to `ErrorGeneracion` for the main generation call — a bug here
-    (including the verifier call itself failing) degrades to keeping the
+    (including a verifier call itself failing) degrades to keeping the
     model's original text, never surfaces as a fake generation error.
     """
     if not isinstance(texto, str) or not texto.strip():
@@ -136,32 +209,29 @@ def postprocesar_descripcion(texto: str, transcripcion: str, cliente) -> str:
         lineas = lineas[1:-1]
         resultado = "\n".join(lineas)
 
-    indice_encabezado = None
-    for i, linea in enumerate(lineas):
-        if linea.strip().rstrip(":") == ENCABEZADO_RESULTADO:
-            indice_encabezado = i
-            break
+    if contexto:
+        ubicacion_modulo = _ubicar_seccion(lineas, ENCABEZADO_MODULO)
+        if ubicacion_modulo is not None:
+            i_modulo, fin_modulo = ubicacion_modulo
+            cuerpo_modulo = "\n".join(lineas[i_modulo + 1 : fin_modulo]).strip()
+            if cuerpo_modulo and cuerpo_modulo != MODULO_NO_IDENTIFICADO:
+                fuente = f"{transcripcion}\n{contexto}"
+                if not _verificar_modulo_afectado(fuente, cuerpo_modulo, cliente):
+                    lineas = _reemplazar_cuerpo(lineas, i_modulo, fin_modulo, MODULO_NO_IDENTIFICADO)
+                    resultado = "\n".join(lineas)
 
-    if indice_encabezado is None:
+    ubicacion_resultado = _ubicar_seccion(lineas, ENCABEZADO_RESULTADO)
+    if ubicacion_resultado is None:
         return resultado
 
-    fin_cuerpo = len(lineas)
-    for j in range(indice_encabezado + 1, len(lineas)):
-        if lineas[j].startswith("## "):
-            fin_cuerpo = j
-            break
-
+    indice_encabezado, fin_cuerpo = ubicacion_resultado
     cuerpo = "\n".join(lineas[indice_encabezado + 1 : fin_cuerpo]).strip()
 
     if cuerpo and _verificar_resultado_esperado(transcripcion, cuerpo, cliente):
         return resultado
 
-    reemplazo = [AVISO_RESULTADO_NO_CONFIABLE]
-    if fin_cuerpo < len(lineas):
-        reemplazo.append("")
-
-    nuevas_lineas = lineas[: indice_encabezado + 1] + reemplazo + lineas[fin_cuerpo:]
-    return "\n".join(nuevas_lineas)
+    lineas = _reemplazar_cuerpo(lineas, indice_encabezado, fin_cuerpo, AVISO_RESULTADO_NO_CONFIABLE)
+    return "\n".join(lineas)
 
 
 def generar_descripcion(
@@ -230,4 +300,4 @@ def generar_descripcion(
             "la API de Anthropic). Ver logs/app.log para el detalle técnico."
         ) from exc
 
-    return postprocesar_descripcion(_texto_de(respuesta), transcripcion, cliente)
+    return postprocesar_descripcion(_texto_de(respuesta), transcripcion, cliente, contexto)

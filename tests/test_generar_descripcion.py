@@ -9,6 +9,7 @@ from generar_descripcion import (
     AVISO_RESULTADO_NO_CONFIABLE,
     ENCABEZADO_RESULTADO,
     MODELO,
+    MODULO_NO_IDENTIFICADO,
     ErrorConfiguracion,
     generar_descripcion,
     postprocesar_descripcion,
@@ -19,6 +20,7 @@ from prompts import (
     GENERADOR_DESCRIPCION_TICKET,
     GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO,
     PLANTILLA_TICKET_JIRA,
+    VERIFICADOR_MODULO_AFECTADO,
     VERIFICADOR_RESULTADO_ESPERADO,
 )
 
@@ -35,27 +37,41 @@ class FakeMensaje:
 
 class FakeMessages:
     """Discriminates by `system`: a `VERIFICADOR_RESULTADO_ESPERADO` call is
-    the verifier (JSON-prefill `{"fundamentado": ...}`), anything else is
-    the main generation call. Discriminating on `system` rather than
-    `model` because `MODELO == MODELO_AUXILIAR` now (both alias
-    `MODELO_HAIKU`)."""
+    the resultado-esperado verifier, a `VERIFICADOR_MODULO_AFECTADO` call is
+    the módulo-afectado verifier (both JSON-prefill), anything else is the
+    main generation call. Discriminating on `system` rather than `model`
+    because `MODELO == MODELO_AUXILIAR` now (both alias `MODELO_HAIKU`)."""
 
-    def __init__(self, respuesta="Descripción generada de prueba", fundamentado=True):
+    def __init__(
+        self,
+        respuesta="Descripción generada de prueba",
+        fundamentado=True,
+        citado_literalmente=True,
+    ):
         self.calls = []
         self._respuesta = respuesta
         self._fundamentado = fundamentado
+        self._citado_literalmente = citado_literalmente
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
         if kwargs.get("system") == VERIFICADOR_RESULTADO_ESPERADO:
             valor = "true" if self._fundamentado else "false"
             return FakeMensaje(f'"fundamentado": {valor}}}')
+        if kwargs.get("system") == VERIFICADOR_MODULO_AFECTADO:
+            valor = "true" if self._citado_literalmente else "false"
+            return FakeMensaje(f'"citado_literalmente": {valor}}}')
         return FakeMensaje(self._respuesta)
 
 
 class FakeAnthropic:
-    def __init__(self, respuesta="Descripción generada de prueba", fundamentado=True):
-        self.messages = FakeMessages(respuesta, fundamentado)
+    def __init__(
+        self,
+        respuesta="Descripción generada de prueba",
+        fundamentado=True,
+        citado_literalmente=True,
+    ):
+        self.messages = FakeMessages(respuesta, fundamentado, citado_literalmente)
 
 
 @pytest.fixture(autouse=True)
@@ -495,6 +511,96 @@ def test_postprocesar_absent_section_is_a_no_op_and_skips_verifier():
 
     assert postprocesar_descripcion(texto, "transcripción", cliente) == texto
     assert cliente.messages.calls == []
+
+
+# --- Post-processor: módulo-afectado verifier (only when contexto is non-empty) --
+
+
+def test_postprocesar_modulo_verifier_skipped_when_no_contexto():
+    """Real bug this guards against: the model invented 'Edición masiva de
+    documentos' instead of the analyst's own 'listado único de documentos'.
+    Without contexto (rule 6's only source is the transcript itself), the
+    verifier must not run at all — zero extra calls, same as before this
+    guardrail existed."""
+    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic()
+
+    resultado = postprocesar_descripcion(texto, "transcripción", cliente, contexto="")
+
+    assert resultado == texto
+    assert cliente.messages.calls == []
+
+
+def test_postprocesar_modulo_verifier_says_literal_keeps_text():
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic(citado_literalmente=True)
+
+    resultado = postprocesar_descripcion(
+        texto, "transcripción", cliente, contexto="doc de Listado único de documentos"
+    )
+
+    assert resultado == texto
+    assert len(cliente.messages.calls) == 1
+    assert cliente.messages.calls[0]["system"] == VERIFICADOR_MODULO_AFECTADO
+
+
+def test_postprocesar_modulo_verifier_says_invented_replaces_with_no_identificado():
+    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic(citado_literalmente=False)
+
+    resultado = postprocesar_descripcion(
+        texto,
+        "El analista habló del listado único de documentos.",
+        cliente,
+        contexto="doc de Listado único de documentos",
+    )
+
+    assert MODULO_NO_IDENTIFICADO in resultado
+    assert "Edición masiva de documentos" not in resultado
+    assert "## Qué pasó" in resultado  # rest of the ticket untouched
+
+
+def test_postprocesar_modulo_verifier_skipped_when_already_no_identificado():
+    texto = f"## Módulo afectado\n{MODULO_NO_IDENTIFICADO}\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic()
+
+    resultado = postprocesar_descripcion(texto, "transcripción", cliente, contexto="algún contexto")
+
+    assert resultado == texto
+    assert cliente.messages.calls == []
+
+
+def test_postprocesar_modulo_verifier_exception_defaults_to_keeping_text():
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+
+    class MessagesRotas:
+        def create(self, **kwargs):
+            raise RuntimeError("fallo de red simulado")
+
+    class ClienteRoto:
+        def __init__(self):
+            self.messages = MessagesRotas()
+
+    resultado = postprocesar_descripcion(texto, "transcripción", ClienteRoto(), contexto="algún contexto")
+
+    assert resultado == texto
+
+
+def test_generar_descripcion_calls_modulo_verifier_when_context_used(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic(respuesta=texto, citado_literalmente=True)
+
+    resultado = generar_descripcion(
+        "transcripción de prueba",
+        cliente=cliente,
+        proveedor_contexto=lambda t: "doc de Listado único de documentos",
+    )
+
+    assert resultado == texto.strip()  # _texto_de() strips the raw response first
+    # 1 generation call + 1 módulo-afectado verifier call.
+    assert len(cliente.messages.calls) == 2
+    assert cliente.messages.calls[1]["system"] == VERIFICADOR_MODULO_AFECTADO
 
 
 def test_postprocesar_empty_body_becomes_notice_without_calling_verifier():
