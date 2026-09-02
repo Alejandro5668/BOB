@@ -10,9 +10,11 @@ import pytest
 from generar_descripcion import (
     AVISO_RESULTADO_NO_CONFIABLE,
     ENCABEZADO_RESULTADO,
+    MAX_REINTENTOS_RATE_LIMIT,
     MODELO,
     MODELO_AUXILIAR,
     ErrorConfiguracion,
+    _crear_completion_con_reintento,
     generar_descripcion,
     postprocesar_descripcion,
 )
@@ -503,6 +505,110 @@ def test_fake_groq_canned_response_round_trips_unchanged():
     assert postprocesar_descripcion("Descripción generada de prueba", "transcripción", cliente) == (
         "Descripción generada de prueba"
     )
+
+
+# --- _crear_completion_con_reintento: rate-limit retry ----------------------
+
+
+class ErrorRateLimitFalso(RuntimeError):
+    def __init__(self, mensaje):
+        super().__init__(mensaje)
+        self.status_code = 429
+
+
+class ErrorNoRateLimitFalso(RuntimeError):
+    def __init__(self, mensaje):
+        super().__init__(mensaje)
+        self.status_code = 400
+
+
+def test_reintento_no_op_on_success():
+    cliente = FakeGroq()
+    resultado = _crear_completion_con_reintento(cliente, model=MODELO, messages=[])
+    assert resultado.choices[0].message.content == "Descripción generada de prueba"
+    assert len(cliente.chat.completions.calls) == 1
+
+
+def test_reintento_retries_on_rate_limit_then_succeeds(monkeypatch):
+    esperas = []
+    monkeypatch.setattr("generar_descripcion.time.sleep", lambda s: esperas.append(s))
+
+    intentos = {"n": 0}
+
+    class ClienteFallaUnaVez:
+        class chat:
+            class completions:
+                calls = []
+
+                @staticmethod
+                def create(**kwargs):
+                    ClienteFallaUnaVez.chat.completions.calls.append(kwargs)
+                    intentos["n"] += 1
+                    if intentos["n"] == 1:
+                        raise ErrorRateLimitFalso("... please try again in 3.5s")
+                    return FakeResponse("ok")
+
+    resultado = _crear_completion_con_reintento(ClienteFallaUnaVez(), model=MODELO, messages=[])
+
+    assert resultado.choices[0].message.content == "ok"
+    assert intentos["n"] == 2
+    assert esperas == [4.5]  # parsed wait (3.5) + 1s buffer
+
+
+def test_reintento_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr("generar_descripcion.time.sleep", lambda s: None)
+    llamadas = []
+
+    class ClienteSiempreFalla:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    llamadas.append(kwargs)
+                    raise ErrorRateLimitFalso("please try again in 1s")
+
+    with pytest.raises(ErrorRateLimitFalso):
+        _crear_completion_con_reintento(ClienteSiempreFalla(), model=MODELO, messages=[])
+
+    assert len(llamadas) == MAX_REINTENTOS_RATE_LIMIT + 1
+
+
+def test_reintento_does_not_retry_non_rate_limit_errors(monkeypatch):
+    llamado = []
+    monkeypatch.setattr("generar_descripcion.time.sleep", lambda s: llamado.append(s))
+
+    class ClienteFallaFuerte:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    raise ErrorNoRateLimitFalso("clave inválida")
+
+    with pytest.raises(ErrorNoRateLimitFalso):
+        _crear_completion_con_reintento(ClienteFallaFuerte(), model=MODELO, messages=[])
+
+    assert llamado == []
+
+
+def test_reintento_falls_back_to_default_wait_when_message_unparseable(monkeypatch):
+    esperas = []
+    monkeypatch.setattr("generar_descripcion.time.sleep", lambda s: esperas.append(s))
+
+    intentos = {"n": 0}
+
+    class ClienteMensajeRaro:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    intentos["n"] += 1
+                    if intentos["n"] == 1:
+                        raise ErrorRateLimitFalso("rate limited, no parseable wait here")
+                    return FakeResponse("ok")
+
+    _crear_completion_con_reintento(ClienteMensajeRaro(), model=MODELO, messages=[])
+
+    assert esperas == [5.0]
 
 
 # --- Repository rule: no inline prompt text in generar_descripcion.py -----

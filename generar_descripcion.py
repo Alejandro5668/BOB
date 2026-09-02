@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Callable, Optional
 
 from prompts import (
@@ -65,6 +66,40 @@ AVISO_RESULTADO_NO_CONFIABLE = (
 
 _PATRON_FENCE_INICIO = re.compile(r"^```[a-zA-Z]*$")
 _PATRON_FENCE_FIN = re.compile(r"^```$")
+
+# Groq's free-tier TPM limit is an aggregate across ALL calls in the same
+# rolling minute — a single query that needs several selector batches
+# (contexto_memoria.py) plus generation plus verification can exceed it
+# even though no single call is oversized (confirmed live against the
+# real 273-file Kawak corpus). Groq's own error message names the exact
+# wait time ("...please try again in 22.5s"); retrying after that instead
+# of failing lets one query safely span more than a minute.
+_PATRON_ESPERA_RATE_LIMIT = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
+MAX_REINTENTOS_RATE_LIMIT = 3
+
+
+def _crear_completion_con_reintento(cliente, **kwargs):
+    """`cliente.chat.completions.create(**kwargs)`, retrying on a 429
+    rate-limit response by waiting the delay Groq reports in the error
+    message. Shared by every Groq-calling module in this project
+    (contexto_memoria.py, consultar_documentacion.py) — import from here
+    rather than duplicating."""
+    intentos = 0
+    while True:
+        try:
+            return cliente.chat.completions.create(**kwargs)
+        except Exception as exc:
+            es_rate_limit = getattr(exc, "status_code", None) == 429
+            intentos += 1
+            if not es_rate_limit or intentos > MAX_REINTENTOS_RATE_LIMIT:
+                raise
+            coincidencia = _PATRON_ESPERA_RATE_LIMIT.search(str(exc))
+            espera = float(coincidencia.group(1)) + 1 if coincidencia else 5.0
+            logger.warning(
+                "Rate limit de Groq alcanzado, reintentando en %.1fs (intento %d/%d)",
+                espera, intentos, MAX_REINTENTOS_RATE_LIMIT,
+            )
+            time.sleep(espera)
 
 
 class ErrorConfiguracion(RuntimeError):
@@ -111,7 +146,8 @@ def _verificar_resultado_esperado(transcripcion: str, cuerpo: str, cliente) -> b
     )
 
     try:
-        respuesta = cliente.chat.completions.create(
+        respuesta = _crear_completion_con_reintento(
+            cliente,
             model=MODELO_AUXILIAR,
             messages=[
                 {"role": "system", "content": VERIFICADOR_RESULTADO_ESPERADO},
@@ -232,7 +268,8 @@ def generar_descripcion(
         mensaje_usuario = ENTRADA_GENERADOR_DESCRIPCION.format(transcripcion=transcripcion)
 
     try:
-        respuesta = cliente.chat.completions.create(
+        respuesta = _crear_completion_con_reintento(
+            cliente,
             model=modelo,
             messages=[
                 {"role": "system", "content": system_prompt},

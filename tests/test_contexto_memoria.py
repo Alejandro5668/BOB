@@ -54,6 +54,26 @@ class FakeGroq:
         self.chat = FakeChat(archivos_elegidos, error)
 
 
+class FakeCompletionsSecuencia:
+    """Returns a different canned `archivos` response per call, in order —
+    for testing multi-batch / final cross-batch selection behavior."""
+
+    def __init__(self, respuestas):
+        self.calls = []
+        self._respuestas = list(respuestas)
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        import json
+
+        return FakeResponse(json.dumps({"archivos": self._respuestas.pop(0)}))
+
+
+class FakeGroqSecuencia:
+    def __init__(self, respuestas):
+        self.chat = type("Chat", (), {"completions": FakeCompletionsSecuencia(respuestas)})()
+
+
 def _crear_arbol(raiz: Path, archivos: dict) -> Path:
     """Build an arbitrary tree of .md files under `raiz` from a
     {ruta_relativa: contenido} dict — any nesting, any naming."""
@@ -234,17 +254,49 @@ def test_elegir_documentos_relevantes_batches_large_listings(tmp_path):
     assert len(cliente.chat.completions.calls) > 1
 
 
-def test_elegir_documentos_relevantes_stops_early_once_max_reached(tmp_path):
+def test_elegir_documentos_relevantes_scans_every_batch_no_early_stop(tmp_path):
+    """Regression test: a real query against the live Kawak corpus once
+    returned an unrelated `aud_auditoria` file instead of the actual
+    `gst_documental` match, because an early-stop-on-first-3-picks design
+    never even looked at the later batch containing the real match. Every
+    batch must always be scanned, regardless of how many candidates an
+    earlier batch already produced."""
     documentos = [(f"doc{i}.md", "x" * 100) for i in range(300)]
-    # The 3 fixed picks all fall within the first batch (~115 docs at this
-    # per-doc size) — once MAX_ARCHIVOS_SELECCIONADOS is hit there, later
-    # batches must never be called.
+    # Same 3 (deduplicated) picks every batch — if early-stop were still
+    # in effect, only 1 call would happen; it must not be.
     cliente = FakeGroq(archivos_elegidos=["doc0.md", "doc1.md", "doc2.md"])
+
+    cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
+
+    assert len(cliente.chat.completions.calls) > 1
+
+
+def test_elegir_documentos_relevantes_final_call_corrects_early_false_positive(monkeypatch):
+    """The exact bug found live: an early batch (wrongly) picks a
+    plausible-but-unrelated file among its candidates; a later batch also
+    contributes candidates. Once more than MAX_ARCHIVOS_SELECCIONADOS
+    survive across all batches, the final cross-batch call must be able
+    to discard the early false positive rather than keep it by default."""
+    monkeypatch.setattr(cm, "CARACTERES_POR_LOTE", 130)
+    documentos = [
+        ("falso_positivo.md", "x" * 40),
+        ("otro_de_lote_uno.md", "x" * 40),
+        ("el_correcto.md", "y" * 40),
+        ("tambien_valido.md", "y" * 40),
+    ]
+    cliente = FakeGroqSecuencia(
+        [
+            ["falso_positivo.md", "otro_de_lote_uno.md"],  # batch 1: 2 picks
+            ["el_correcto.md", "tambien_valido.md"],  # batch 2: 2 more -> 4 total, over the cap
+            ["el_correcto.md", "tambien_valido.md", "otro_de_lote_uno.md"],  # final: drops the false positive
+        ]
+    )
 
     seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
 
-    assert seleccionados == ["doc0.md", "doc1.md", "doc2.md"]
-    assert len(cliente.chat.completions.calls) == 1
+    assert "falso_positivo.md" not in seleccionados
+    assert seleccionados == ["el_correcto.md", "tambien_valido.md", "otro_de_lote_uno.md"]
+    assert len(cliente.chat.completions.calls) == 3
 
 
 def test_elegir_documentos_relevantes_sends_listing_and_transcript(tmp_path):

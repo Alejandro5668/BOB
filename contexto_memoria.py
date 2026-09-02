@@ -222,11 +222,12 @@ def _construir_listado(documentos: list[tuple[str, str]]) -> str:
     return "\n".join(f"- {ruta}: {vista_previa}" for ruta, vista_previa in documentos)
 
 
-def _lotes_de_documentos(
-    documentos: list[tuple[str, str]], presupuesto: int = CARACTERES_POR_LOTE
-):
+def _lotes_de_documentos(documentos: list[tuple[str, str]], presupuesto: Optional[int] = None):
     """Yield successive batches of `documentos` whose formatted listing
-    stays within `presupuesto` characters each."""
+    stays within `presupuesto` characters each (default: `CARACTERES_POR_LOTE`,
+    read at call time — not a bound default — so tests can monkeypatch it)."""
+    if presupuesto is None:
+        presupuesto = CARACTERES_POR_LOTE
     lote: list[tuple[str, str]] = []
     tamano = 0
     for doc in documentos:
@@ -240,53 +241,69 @@ def _lotes_de_documentos(
         yield lote
 
 
+def _preguntar_selector(transcripcion: str, documentos: list[tuple[str, str]], cliente) -> list[str]:
+    """One Groq call over a single (already budget-sized) document listing."""
+    from generar_descripcion import _crear_completion_con_reintento
+    from prompts import ENTRADA_SELECTOR_DOCUMENTOS, SELECTOR_DOCUMENTOS_RELEVANTES
+
+    respuesta = _crear_completion_con_reintento(
+        cliente,
+        model=MODELO_SELECTOR,
+        messages=[
+            {"role": "system", "content": SELECTOR_DOCUMENTOS_RELEVANTES},
+            {
+                "role": "user",
+                "content": ENTRADA_SELECTOR_DOCUMENTOS.format(
+                    transcripcion=transcripcion,
+                    listado=_construir_listado(documentos),
+                ),
+            },
+        ],
+        temperature=0.0,
+        max_tokens=500,
+        reasoning_effort="low",
+        response_format={"type": "json_object"},
+    )
+    datos = json.loads(respuesta.choices[0].message.content)
+    return datos.get("archivos", [])
+
+
 def elegir_documentos_relevantes(
     transcripcion: str, documentos: list[tuple[str, str]], cliente
 ) -> list[str]:
     """Ask Groq which of `documentos` (if any) are relevant to `transcripcion`.
 
     The listing is sent in budget-bounded batches (see `CARACTERES_POR_LOTE`)
-    — one Groq call per batch, stopping early once
-    `MAX_ARCHIVOS_SELECCIONADOS` is reached. Returns a list of chosen
-    `ruta_relativa` values, always a subset of `documentos`' own paths
-    (never trusts an unlisted path the model might invent). May raise —
-    callers must handle degradation.
+    — every batch is scanned (no early stop: a batch is evaluated in
+    isolation from the others, so a plausible-but-wrong pick in an early
+    batch must never silently outrank a better match only visible in a
+    later one — confirmed live against the real Kawak docs, where an
+    unrelated `aud_auditoria` file beat the real `gst_documental` match
+    this way). When more than `MAX_ARCHIVOS_SELECCIONADOS` candidates
+    survive across all batches, one final cross-batch call re-ranks just
+    that short list. Returns a list of chosen `ruta_relativa` values,
+    always a subset of `documentos`' own paths (never trusts an unlisted
+    path the model might invent). May raise — callers must handle
+    degradation.
     """
     if not documentos:
         return []
 
-    from prompts import ENTRADA_SELECTOR_DOCUMENTOS, SELECTOR_DOCUMENTOS_RELEVANTES
-
     rutas_validas = {ruta for ruta, _ in documentos}
-    seleccionados: list[str] = []
+    candidatos: list[str] = []
 
     for lote in _lotes_de_documentos(documentos):
-        respuesta = cliente.chat.completions.create(
-            model=MODELO_SELECTOR,
-            messages=[
-                {"role": "system", "content": SELECTOR_DOCUMENTOS_RELEVANTES},
-                {
-                    "role": "user",
-                    "content": ENTRADA_SELECTOR_DOCUMENTOS.format(
-                        transcripcion=transcripcion,
-                        listado=_construir_listado(lote),
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=500,
-            reasoning_effort="low",
-            response_format={"type": "json_object"},
-        )
-        datos = json.loads(respuesta.choices[0].message.content)
-        for ruta in datos.get("archivos", []):
-            if ruta in rutas_validas and ruta not in seleccionados:
-                seleccionados.append(ruta)
+        for ruta in _preguntar_selector(transcripcion, lote, cliente):
+            if ruta in rutas_validas and ruta not in candidatos:
+                candidatos.append(ruta)
 
-        if len(seleccionados) >= MAX_ARCHIVOS_SELECCIONADOS:
-            break
+    if not candidatos or len(candidatos) <= MAX_ARCHIVOS_SELECCIONADOS:
+        return candidatos
 
-    return seleccionados[:MAX_ARCHIVOS_SELECCIONADOS]
+    documentos_por_ruta = dict(documentos)
+    candidatos_documentos = [(ruta, documentos_por_ruta[ruta]) for ruta in candidatos]
+    seleccion_final = _preguntar_selector(transcripcion, candidatos_documentos, cliente)
+    return [ruta for ruta in seleccion_final if ruta in candidatos][:MAX_ARCHIVOS_SELECCIONADOS]
 
 
 # --- Total provider ---------------------------------------------------------
