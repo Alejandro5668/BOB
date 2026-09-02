@@ -40,7 +40,7 @@ from prompts import (
 
 logger = logging.getLogger(__name__)
 
-MODELO = "llama-3.3-70b-versatile"
+MODELO = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile decommissioned by Groq, Aug 2026
 
 ProveedorContexto = Callable[[str], str]
 
