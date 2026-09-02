@@ -1,8 +1,9 @@
 """Centralized prompt repository (see CLAUDE.md "Prompt repository convention").
 
-Every prompt sent to an LLM (Groq today, any future provider) lives here as a
-named, role-descriptive constant with a short docstring. `generar_descripcion.py`
-imports these — it defines no prompt text of its own.
+Every prompt sent to an LLM (Claude Haiku 4.5 today, any future provider)
+lives here as a named, role-descriptive constant with a short docstring.
+`generar_descripcion.py` imports these — it defines no prompt text of its
+own.
 """
 
 from __future__ import annotations
@@ -107,23 +108,6 @@ Archivos disponibles:
 {listado}"""
 """Mensaje de usuario para SELECTOR_DOCUMENTOS_RELEVANTES: transcripción +
 listado "- ruta: vista previa" de cada archivo .md encontrado."""
-
-ENRIQUECEDOR_DOCUMENTACION = """Resumís documentación técnica interna para analistas que entienden el negocio pero no son programadores.
-
-Explicá qué hace la funcionalidad o el módulo y para qué sirve: qué permite hacer, en qué casos se usa, y qué pasa cuando se usa. Dejá afuera el detalle de implementación (nombres de tablas, funciones, rutas de archivos, fragmentos de código) salvo que sea lo único que explique el comportamiento.
-
-Escribí entre 4 y 8 líneas, en español, en texto corrido o viñetas simples. No inventes nada que no esté en el documento: si algo no está, no lo menciones. Devolvé solo el resumen, sin encabezados, preámbulos ni comentarios sobre el resumen."""
-"""Prompt de sistema del enriquecedor (Claude Haiku, ver
-`contexto_enriquecido.py`): convierte un .md de documentación técnica en un
-resumen funcional breve antes de inyectarlo como contexto."""
-
-ENTRADA_ENRIQUECEDOR_DOCUMENTACION = """Documento: {ruta}
----
-{contenido}
----
-Resumen funcional:"""
-"""Mensaje de usuario para ENRIQUECEDOR_DOCUMENTACION: ruta relativa del
-documento + su contenido crudo."""
 
 VERIFICADOR_RESULTADO_ESPERADO = """Evaluás si un texto de "resultado esperado" está respaldado explícitamente por una transcripción, o si es una expectativa inventada/genérica que nadie dijo.
 

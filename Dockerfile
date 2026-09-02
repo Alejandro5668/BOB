@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py transcribir.py generar_descripcion.py contexto_memoria.py contexto_enriquecido.py consultar_documentacion.py prompts.py logging_config.py ./
+COPY app.py transcribir.py generar_descripcion.py contexto_memoria.py cliente_anthropic.py consultar_documentacion.py prompts.py logging_config.py ./
 COPY memory/ ./memory/
 COPY .streamlit/ ./.streamlit/
 

@@ -1,72 +1,59 @@
-"""Haiku-based functional enrichment of the finally-selected documentation.
+"""Shared Anthropic client scaffolding — Claude Haiku 4.5 for every LLM
+call site in this project (ticket generation, documentation Q&A, and
+document selection for context retrieval).
 
-Turns each raw `.md` (written for developers) into a short functional
-summary for the analyst-facing prompts, cached by SHA-256 of the raw
-content at `cache/documentacion/<hash>.txt`.
+Owns client construction, 429-retry, and the two response-shape helpers
+every call site needs: `_texto_de` (plain text out of a response) and
+`_pedir_json` (a JSON-mode replacement built on an assistant-role prefill
+of `"{"` plus `json.JSONDecoder().raw_decode`, since the Anthropic
+Messages API has no `response_format` parameter equivalent to Groq's JSON
+mode).
 
-TOTAL by contract: `enriquecer_documentos` never raises and always returns
-one block per input document, in the input order. Any failure (missing
-`ANTHROPIC_API_KEY`, API error, empty response, cache I/O error) degrades
-that one document to its verbatim raw content.
+`ErrorConfiguracion` is the ONE missing/blank `ANTHROPIC_API_KEY` error for
+the whole project. Whether it is fatal is a CALL-SITE policy, not baked in
+here: `generar_descripcion.generar_descripcion` and
+`consultar_documentacion.responder_consulta` let it propagate (fail-fast —
+no key means no call); `contexto_memoria.buscar_contexto` and the
+"Resultado esperado" verifier (`generar_descripcion._verificar_resultado_esperado`)
+catch it and degrade instead.
 
-CACHE KEY IS CONTENT-ONLY: it does NOT include the prompt text or the model
-id. If `ENRIQUECEDOR_DOCUMENTACION` or `MODELO_ENRIQUECEDOR` changes, wipe
-`cache/documentacion/` by hand or stale summaries will be served forever.
-
-Prompt text lives in `prompts.py` (see CLAUDE.md "Prompt repository
-convention"). Never imports Streamlit.
+Never imports Streamlit.
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import os
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Optional
-
-from prompts import ENRIQUECEDOR_DOCUMENTACION, ENTRADA_ENRIQUECEDOR_DOCUMENTACION
 
 logger = logging.getLogger(__name__)
 
-MODELO_ENRIQUECEDOR = "claude-haiku-4-5-20251001"
-MAX_TOKENS_ENRIQUECIMIENTO = 700
-MAX_TRABAJADORES = 3
+MODELO_HAIKU = "claude-haiku-4-5-20251001"
 MAX_REINTENTOS_RATE_LIMIT = 3
 # Anthropic's error text has no Groq-style "try again in Xs" to parse, and
 # the `retry-after` header was not live-verified — fixed backoff on purpose.
 ESPERA_RATE_LIMIT = 5.0
-DIRECTORIO_CACHE_POR_DEFECTO = "./cache/documentacion"
 
 
-class ErrorConfiguracionAnthropic(RuntimeError):
-    """ANTHROPIC_API_KEY absent/blank. Non-fatal: callers degrade to raw content.
-
-    Deliberately NOT `generar_descripcion.ErrorConfiguracion`, which is
-    documented as GROQ-specific and IS fatal at its call site.
-    """
-
-
-class ErrorEnriquecimiento(RuntimeError):
-    """Haiku answered, but with nothing usable."""
-
-
-# --- Client ---------------------------------------------------------------
+class ErrorConfiguracion(RuntimeError):
+    """`ANTHROPIC_API_KEY` absent/blank. Fatality is a call-site policy:
+    some callers let this propagate (fail-fast), others catch it and
+    degrade — see the module docstring above."""
 
 
 def _crear_cliente():
     """Build the Anthropic client, failing fast if the key is not set.
 
-    Mirrors `generar_descripcion._crear_cliente`: env-only, no network call
-    before the check, never logs the key value.
+    Reads `ANTHROPIC_API_KEY` only from the environment. Raises
+    `ErrorConfiguracion` before any network call if the value is absent or
+    blank. Never logs the key value.
     """
     clave = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not clave:
-        raise ErrorConfiguracionAnthropic(
-            "ANTHROPIC_API_KEY no está configurada; la documentación se usará sin enriquecer."
+        raise ErrorConfiguracion(
+            "ANTHROPIC_API_KEY no está configurada. Debe definirse la variable de "
+            "entorno (ver .env.example) antes de continuar."
         )
 
     from anthropic import Anthropic
@@ -77,9 +64,7 @@ def _crear_cliente():
 def _crear_mensaje_con_reintento(cliente, **kwargs):
     """`cliente.messages.create(**kwargs)` with 429 retry.
 
-    Same `status_code == 429` shape as the Groq wrapper (verified live,
-    anthropic 1.3.0) but a different call surface, so it is a separate
-    function rather than a generic one spanning both SDKs.
+    `status_code == 429` shape verified live against anthropic 1.3.0.
     """
     intentos = 0
     while True:
@@ -97,146 +82,39 @@ def _crear_mensaje_con_reintento(cliente, **kwargs):
             time.sleep(ESPERA_RATE_LIMIT)
 
 
-# --- Content-addressed cache ----------------------------------------------
+def _texto_de(respuesta) -> str:
+    """Join every text content block in an Anthropic Messages response.
 
-
-def resolver_directorio_cache(directorio: Optional[str] = None) -> Path:
-    """Explicit arg > `CACHE_DOCUMENTACION_DIR` env var > `./cache/documentacion`.
-
-    Mirrors `contexto_memoria.resolver_directorio`. The env var is optional;
-    it is not required in `.env`.
+    Anthropic returns a list of content blocks, NOT Groq's
+    `choices[0].message.content` string — this is the shape every
+    `FakeAnthropic` test fixture in this project must mimic.
     """
-    valor = (
-        directorio
-        if directorio is not None
-        else os.environ.get("CACHE_DOCUMENTACION_DIR", "").strip()
-    )
-    if not valor:
-        valor = DIRECTORIO_CACHE_POR_DEFECTO
-    return Path(valor)
-
-
-def _hash_contenido(contenido: str) -> str:
-    return hashlib.sha256(contenido.encode("utf-8")).hexdigest()
-
-
-def _leer_cache(raiz: Path, clave: str) -> Optional[str]:
-    """Cached summary, or None (miss / unreadable / empty). Never raises."""
-    try:
-        ruta = raiz / f"{clave}.txt"
-        if not ruta.is_file():
-            return None
-        texto = ruta.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    return texto or None
-
-
-def _escribir_cache(raiz: Path, clave: str, resumen: str) -> None:
-    """Atomic tmp+replace write. Never raises: an unwritable cache only
-    means the next request re-enriches."""
-    try:
-        raiz.mkdir(parents=True, exist_ok=True)
-        temporal = raiz / f"{clave}.{os.getpid()}-{threading.get_ident()}.tmp"
-        temporal.write_text(resumen, encoding="utf-8")
-        temporal.replace(raiz / f"{clave}.txt")
-    except OSError as exc:
-        logger.warning(
-            "No se pudo escribir la caché de enriquecimiento (%s): %s: %s",
-            raiz, type(exc).__name__, exc,
-        )
-
-
-# --- Single-document enrichment -------------------------------------------
-
-
-def _enriquecer_uno(cliente, ruta: str, contenido: str) -> str:
-    """One Haiku call. Raises on failure; the caller maps that to raw fallback."""
-    respuesta = _crear_mensaje_con_reintento(
-        cliente,
-        model=MODELO_ENRIQUECEDOR,
-        max_tokens=MAX_TOKENS_ENRIQUECIMIENTO,
-        temperature=0.0,
-        system=ENRIQUECEDOR_DOCUMENTACION,
-        messages=[
-            {
-                "role": "user",
-                "content": ENTRADA_ENRIQUECEDOR_DOCUMENTACION.format(
-                    ruta=ruta, contenido=contenido
-                ),
-            }
-        ],
-    )
-    # Anthropic returns a list of content blocks, NOT Groq's
-    # `choices[0].message.content` — this is the shape FakeAnthropic must mimic.
-    texto = "".join(
+    return "".join(
         bloque.text for bloque in respuesta.content if getattr(bloque, "type", None) == "text"
     ).strip()
-    if not texto:
-        raise ErrorEnriquecimiento(f"Respuesta vacía de Haiku para {ruta}")
-    return texto
 
 
-# --- Public: total, order-preserving --------------------------------------
+def _pedir_json(cliente, *, model, system, mensaje_usuario, max_tokens) -> dict:
+    """Ask for a JSON object using an assistant-role prefill of `"{"`
+    instead of Groq's `response_format={"type": "json_object"}` (no
+    equivalent parameter exists on the Messages API).
 
-
-def enriquecer_documentos(
-    documentos: list[tuple[str, str]],
-    *,
-    cliente=None,
-    directorio_cache: Optional[str] = None,
-) -> list[str]:
-    """Return one block per `(ruta, contenido_raw)` pair, same length and order.
-
-    Enriched summary when available, verbatim raw content otherwise. Never
-    raises. Only cache misses reach the thread pool; hits are a plain file
-    read. Results are placed by index — `as_completed` is deliberately not
-    used, because `_ensamblar_contexto` gives earlier blocks budget priority.
+    Parses with `json.JSONDecoder().raw_decode`, NOT `json.loads` — the
+    prefill makes a leading code fence or preamble structurally
+    impossible, but trailing prose after the closing `}` must not blow
+    away an otherwise-good parse.
     """
-    if not documentos:
-        return []
-
-    resultados: list[str] = [contenido for _, contenido in documentos]  # raw fallback preloaded
-    raiz = resolver_directorio_cache(directorio_cache)
-    claves = [_hash_contenido(contenido) for _, contenido in documentos]
-
-    pendientes: list[int] = []
-    for i, clave in enumerate(claves):
-        en_cache = _leer_cache(raiz, clave)
-        if en_cache is not None:
-            resultados[i] = en_cache
-        else:
-            pendientes.append(i)
-
-    if not pendientes:
-        return resultados
-
-    if cliente is None:
-        try:
-            cliente = _crear_cliente()
-        except Exception as exc:
-            logger.warning(
-                "Enriquecimiento omitido, se usa documentación cruda: %s: %s",
-                type(exc).__name__, exc,
-            )
-            return resultados
-
-    with ThreadPoolExecutor(max_workers=min(MAX_TRABAJADORES, len(pendientes))) as pool:
-        futuros = {
-            i: pool.submit(_enriquecer_uno, cliente, documentos[i][0], documentos[i][1])
-            for i in pendientes
-        }
-
-    for i, futuro in futuros.items():  # dict order == selection order
-        try:
-            resumen = futuro.result()
-        except Exception as exc:
-            logger.warning(
-                "Enriquecimiento falló para %s, se usa contenido crudo: %s: %s",
-                documentos[i][0], type(exc).__name__, exc,
-            )
-            continue
-        resultados[i] = resumen
-        _escribir_cache(raiz, claves[i], resumen)
-
-    return resultados
+    respuesta = _crear_mensaje_con_reintento(
+        cliente,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        system=system,
+        messages=[
+            {"role": "user", "content": mensaje_usuario},
+            {"role": "assistant", "content": "{"},
+        ],
+    )
+    texto_completo = "{" + _texto_de(respuesta)
+    datos, _ = json.JSONDecoder().raw_decode(texto_completo)
+    return datos
