@@ -105,6 +105,28 @@ don't pre-build that structure for one feature's prompts.
 
 ---
 
+## Transcription provider decision
+
+`transcribir.py` calls the ElevenLabs Speech-to-Text API
+(`ELEVENLABS_API_KEY`), not local `faster-whisper` — a deliberate
+architecture change from Fase 1, made at the user's explicit request
+after local `base`-model accuracy proved insufficient in real use.
+
+**Why:** the user confirmed audio no longer needs to stay on-machine, so
+transcription accuracy and low per-minute cost won over the
+zero-network-dependency guarantee Fase 1 originally optimized for.
+Groq's own hosted Whisper (`whisper-large-v3-turbo`) was considered and
+rejected in favor of ElevenLabs specifically because the user asked for
+an ElevenLabs-based model by name.
+
+**How it's applied:** `contexto_memoria.nombres_conocidos()` supplies
+known module names/aliases as ElevenLabs `keyterms` (vocabulary bias) —
+the same problem `hotwords` would have solved for local Whisper, solved
+instead at the new provider. When creating an ElevenLabs API key, grant
+it **Speech to Text access only** — no other endpoint is used.
+
+---
+
 ## Logging convention
 
 `logging_config.py` wires stdlib `logging` once at process start (called

@@ -13,6 +13,13 @@ UI/UX pass: transcription now runs automatically the moment a new
 recording is available (no manual "Transcribir" click); file upload is
 out of scope for now; `st.audio_input` is used unconditionally since
 `requirements.txt` already pins `streamlit>=1.40`.
+
+Transcription now calls the ElevenLabs API (see CLAUDE.md "Transcription
+provider" decision) instead of local faster-whisper — a single blocking
+call, not a segment-by-segment stream, so there's no per-percentage
+progress to show; `st.status(...)` communicates "still working" instead.
+Known module names/aliases are passed as `keyterms` to bias recognition
+toward domain vocabulary (e.g. "gestión de riesgos").
 """
 
 import streamlit as st
@@ -22,14 +29,14 @@ from logging_config import configurar_logging
 
 configurar_logging()
 
-from contexto_memoria import diagnosticar
+from contexto_memoria import diagnosticar, nombres_conocidos
 from generar_descripcion import (
     ErrorConfiguracion,
     ErrorGeneracion,
     generar_descripcion,
 )
 from transcribir import (
-    ErrorDependenciaAudio,
+    ErrorConfiguracionAudio,
     ErrorTranscripcion,
     transcribir_bytes,
 )
@@ -71,16 +78,13 @@ grabacion = st.audio_input("Grabá tu descripción del problema")
 
 if grabacion is not None and grabacion.file_id != st.session_state.ultimo_audio_id:
     st.session_state.ultimo_audio_id = grabacion.file_id
-    progreso = st.progress(0.0)
-
-    def _on_progress(fraccion: float) -> None:
-        progreso.progress(fraccion)
-
     try:
         with st.status("Transcribiendo audio...", expanded=True):
-            texto = transcribir_bytes(grabacion.read(), on_progress=_on_progress)
+            texto = transcribir_bytes(
+                grabacion.read(), keyterms=nombres_conocidos()
+            )
         st.session_state.transcripcion = texto
-    except ErrorDependenciaAudio as exc:
+    except ErrorConfiguracionAudio as exc:
         st.error(str(exc))
     except ErrorTranscripcion as exc:
         st.error(str(exc))

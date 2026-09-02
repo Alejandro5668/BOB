@@ -1,121 +1,88 @@
-"""Local CPU audio transcription via faster-whisper.
+"""Audio transcription via the ElevenLabs Speech-to-Text API.
 
-Owns the whole transcription lifecycle: dependency check, model loading,
-temp-file handling, and progress reporting. Never imports Streamlit, so it
-stays callable/testable as a standalone module (see spec "Module
+Owns the ElevenLabs client lifecycle. The client is always
+constructor-injected (never built at import time) so unit tests run
+today with a fake client and a missing `ELEVENLABS_API_KEY` never breaks
+import or testing. Never imports Streamlit (see spec "Module
 Testability").
+
+Audio now leaves this machine (sent to ElevenLabs) — a deliberate
+architecture change from Fase 1's local-only faster-whisper, made at the
+user's explicit request. See CLAUDE.md for the recorded decision.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
-import tempfile
-from typing import Callable, Optional
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-ProgresoCallback = Callable[[float], None]
+MODELO = "scribe_v2"
 
 
-class ErrorDependenciaAudio(RuntimeError):
-    """Raised when ffmpeg/av decode support is not available."""
+class ErrorConfiguracionAudio(RuntimeError):
+    """Raised when ELEVENLABS_API_KEY is absent/blank — before any HTTP call."""
 
 
 class ErrorTranscripcion(RuntimeError):
-    """Raised when audio decode or model inference fails."""
+    """Raised when the ElevenLabs API call fails."""
 
 
-_modelo = None
+def _crear_cliente():
+    """Build the ElevenLabs client, failing fast if the API key is not set.
 
-
-def verificar_dependencias() -> None:
-    """Raise ErrorDependenciaAudio if the `av` package is not importable.
-
-    faster-whisper decodes audio through PyAV bindings (in-process, no
-    shell ffmpeg invocation); if `av` is missing, fail with a clear setup
-    message instead of a raw stack trace.
+    Reads ELEVENLABS_API_KEY only from the environment. Raises
+    ErrorConfiguracionAudio before any network call if the value is
+    absent or blank.
     """
-    if importlib.util.find_spec("av") is None:
-        raise ErrorDependenciaAudio(
-            "Falta el paquete 'av' (requerido para decodificar audio). "
-            "Instala las dependencias con: pip install -r requirements.txt"
+    clave = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if not clave:
+        logger.warning("ELEVENLABS_API_KEY ausente o vacía al intentar transcribir audio.")
+        raise ErrorConfiguracionAudio(
+            "ELEVENLABS_API_KEY no está configurada. Define la variable de entorno "
+            "(ver .env.example) antes de grabar audio."
         )
 
+    from elevenlabs import ElevenLabs
 
-def _cargar_modelo():
-    """Lazily construct and cache the WhisperModel singleton."""
-    global _modelo
-    if _modelo is None:
-        from faster_whisper import WhisperModel
-
-        _modelo = WhisperModel("base", device="cpu", compute_type="int8")
-    return _modelo
-
-
-def transcribir_archivo(
-    ruta: str,
-    *,
-    on_progress: Optional[ProgresoCallback] = None,
-    idioma: str = "es",
-    vad: bool = True,
-) -> str:
-    """Transcribe the audio file at `ruta` and return the full transcript.
-
-    Iterates faster-whisper's lazy segment generator so `on_progress`
-    (0.0..1.0) fires as each segment is actually decoded, giving a real
-    progress signal for multi-minute recordings without a worker thread.
-    """
-    verificar_dependencias()
-    modelo = _cargar_modelo()
-
-    try:
-        segments, info = modelo.transcribe(
-            ruta,
-            vad_filter=vad,
-            language=idioma,
-            beam_size=1,
-        )
-
-        texto = []
-        duracion = info.duration or 0
-        for segment in segments:
-            texto.append(segment.text)
-            if on_progress is not None and duracion > 0:
-                on_progress(min(segment.end / duracion, 1.0))
-
-        if on_progress is not None:
-            on_progress(1.0)
-
-        return "".join(texto).strip()
-    except ErrorDependenciaAudio:
-        raise
-    except Exception as exc:
-        logger.error("Fallo transcribiendo audio (ruta=%s): %s: %s", ruta, type(exc).__name__, exc)
-        raise ErrorTranscripcion(
-            f"No se pudo transcribir el audio: {exc}"
-        ) from exc
+    return ElevenLabs(api_key=clave)
 
 
 def transcribir_bytes(
     datos: bytes,
-    sufijo: str = ".wav",
     *,
-    on_progress: Optional[ProgresoCallback] = None,
+    cliente=None,
+    modelo: str = MODELO,
+    idioma: str = "spa",
+    keyterms: Optional[Iterable[str]] = None,
 ) -> str:
-    """Write `datos` to a temp file, transcribe it, and always clean up.
+    """Send `datos` (raw audio bytes) to ElevenLabs and return the transcript.
 
-    The temp file's handle is closed before faster-whisper opens the path
-    (Windows forbids reopening a file that is still open elsewhere), and
-    the file is unlinked in `finally` regardless of success or failure.
+    `cliente` is injected for testing; when None, `_crear_cliente()` is
+    called, which fails fast on a missing/blank ELEVENLABS_API_KEY.
+    `keyterms` biases recognition toward known vocabulary (e.g. module
+    names from `contexto_memoria.nombres_conocidos()`) — capped at
+    ElevenLabs' documented limit of 1000 terms.
     """
-    tmp = tempfile.NamedTemporaryFile(suffix=sufijo, delete=False)
-    ruta = tmp.name
+    if cliente is None:
+        cliente = _crear_cliente()
+
+    kwargs = {"model_id": modelo, "language_code": idioma}
+    if keyterms:
+        kwargs["keyterms"] = list(keyterms)[:1000]
+
     try:
-        tmp.write(datos)
-        tmp.close()
-        return transcribir_archivo(ruta, on_progress=on_progress)
-    finally:
-        if os.path.exists(ruta):
-            os.unlink(ruta)
+        resultado = cliente.speech_to_text.convert(file=datos, **kwargs)
+    except Exception as exc:
+        logger.error(
+            "Fallo en la llamada a ElevenLabs (modelo=%s): %s: %s",
+            modelo, type(exc).__name__, exc,
+        )
+        raise ErrorTranscripcion(
+            "No se pudo transcribir el audio (fallo de autenticación o de "
+            "la API de ElevenLabs). Ver logs/app.log para el detalle técnico."
+        ) from exc
+
+    return resultado.text

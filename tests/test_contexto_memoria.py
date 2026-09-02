@@ -216,6 +216,16 @@ def test_diagnosticar_returns_spanish_notice_when_missing():
     assert "memory" in aviso.lower() or "transcripción" in aviso.lower()
 
 
+def test_nombres_conocidos_returns_names_and_aliases():
+    nombres = cm.nombres_conocidos(directorio=str(REPO_MEMORY_DIR))
+    assert len(nombres) > 0
+    assert all(isinstance(n, str) for n in nombres)
+
+
+def test_nombres_conocidos_empty_on_missing_memory_dir():
+    assert cm.nombres_conocidos(directorio="ruta/que/no/existe") == []
+
+
 def test_permission_error_on_iterdir_degrades_without_raising(tmp_path, monkeypatch):
     raiz = _crear_memoria(
         tmp_path / "memory", {"modulo_x": {"alias": "equis"}}

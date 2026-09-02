@@ -264,6 +264,20 @@ def diagnosticar(directorio: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def nombres_conocidos(directorio: Optional[str] = None) -> list[str]:
+    """Known module names/aliases, for use as transcription `keyterms`
+    (vocabulary hints). Total: returns `[]` on any failure, never raises."""
+    try:
+        modulos = cargar_modulos(directorio)
+    except ErrorMemoria:
+        return []
+    nombres: list[str] = []
+    for modulo in modulos:
+        nombres.append(modulo.nombre)
+        nombres.extend(modulo.alias)
+    return nombres
+
+
 # --- Budget / truncation ---------------------------------------------------
 
 

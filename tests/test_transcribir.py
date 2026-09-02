@@ -1,116 +1,118 @@
-"""Unit tests for transcribir.py — fake model, no real Whisper inference."""
-
-import os
-import tempfile
+"""Unit tests for transcribir.py — FakeElevenLabs client, no network calls."""
 
 import pytest
 
 import transcribir
 from transcribir import (
-    ErrorDependenciaAudio,
+    MODELO,
+    ErrorConfiguracionAudio,
     ErrorTranscripcion,
     transcribir_bytes,
 )
 
 
-class FakeSegment:
-    def __init__(self, text, end):
+class FakeSpeechToTextResponse:
+    def __init__(self, text):
         self.text = text
-        self.end = end
 
 
-class FakeInfo:
-    def __init__(self, duration):
-        self.duration = duration
-
-
-class FakeModel:
-    """Stands in for faster_whisper.WhisperModel via the loader seam."""
-
-    def __init__(self, segments, info, error=None):
-        self._segments = segments
-        self._info = info
+class FakeSpeechToText:
+    def __init__(self, respuesta="transcripción de prueba", error=None):
+        self.calls = []
+        self._respuesta = respuesta
         self._error = error
 
-    def transcribe(self, ruta, vad_filter=True, language="es", beam_size=1):
+    def convert(self, **kwargs):
+        self.calls.append(kwargs)
         if self._error is not None:
             raise self._error
-        return iter(self._segments), self._info
+        return FakeSpeechToTextResponse(self._respuesta)
 
 
-def _spy_named_temp_file(monkeypatch, created_paths):
-    original = tempfile.NamedTemporaryFile
-
-    def spy(*args, **kwargs):
-        tmp = original(*args, **kwargs)
-        created_paths.append(tmp.name)
-        return tmp
-
-    monkeypatch.setattr(transcribir.tempfile, "NamedTemporaryFile", spy)
+class FakeElevenLabs:
+    def __init__(self, respuesta="transcripción de prueba", error=None):
+        self.speech_to_text = FakeSpeechToText(respuesta, error)
 
 
-def test_temp_file_deleted_on_success(monkeypatch):
-    created_paths = []
-    _spy_named_temp_file(monkeypatch, created_paths)
-
-    segments = [FakeSegment("hola ", 1.0), FakeSegment("mundo", 2.0)]
-    info = FakeInfo(duration=2.0)
-    monkeypatch.setattr(
-        transcribir, "_cargar_modelo", lambda: FakeModel(segments, info)
-    )
-
-    texto = transcribir_bytes(b"audio-bytes-fake")
-
-    assert texto == "hola mundo"
-    assert len(created_paths) == 1
-    assert not os.path.exists(created_paths[0])
+# --- Fail-fast + request shape ---------------------------------------------
 
 
-def test_temp_file_deleted_on_exception(monkeypatch):
-    created_paths = []
-    _spy_named_temp_file(monkeypatch, created_paths)
+def test_missing_key_raises_error_configuracion_before_any_call(monkeypatch):
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
 
-    monkeypatch.setattr(
-        transcribir,
-        "_cargar_modelo",
-        lambda: FakeModel([], FakeInfo(1.0), error=RuntimeError("decode boom")),
-    )
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("ElevenLabs client must not be constructed without a key")
 
-    with pytest.raises(ErrorTranscripcion):
+    import elevenlabs as elevenlabs_module
+
+    monkeypatch.setattr(elevenlabs_module, "ElevenLabs", fail_if_called)
+
+    with pytest.raises(ErrorConfiguracionAudio):
         transcribir_bytes(b"audio-bytes-fake")
 
-    assert len(created_paths) == 1
-    assert not os.path.exists(created_paths[0])
+
+def test_blank_key_raises_error_configuracion(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "   ")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("ElevenLabs client must not be constructed with a blank key")
+
+    import elevenlabs as elevenlabs_module
+
+    monkeypatch.setattr(elevenlabs_module, "ElevenLabs", fail_if_called)
+
+    with pytest.raises(ErrorConfiguracionAudio):
+        transcribir_bytes(b"audio-bytes-fake")
 
 
-def test_on_progress_receives_monotonic_fraction_in_range(monkeypatch):
-    segments = [
-        FakeSegment("uno ", 1.0),
-        FakeSegment("dos ", 2.0),
-        FakeSegment("tres", 4.0),
-    ]
-    info = FakeInfo(duration=4.0)
-    monkeypatch.setattr(
-        transcribir, "_cargar_modelo", lambda: FakeModel(segments, info)
+def test_transcribir_bytes_with_injected_client():
+    cliente = FakeElevenLabs(respuesta="el cliente reporta un error en riesgos")
+
+    texto = transcribir_bytes(b"audio-bytes-fake", cliente=cliente)
+
+    assert texto == "el cliente reporta un error en riesgos"
+    assert len(cliente.speech_to_text.calls) == 1
+
+    kwargs = cliente.speech_to_text.calls[0]
+    assert kwargs["model_id"] == MODELO
+    assert kwargs["language_code"] == "spa"
+    assert kwargs["file"] == b"audio-bytes-fake"
+    assert "keyterms" not in kwargs
+
+
+def test_keyterms_passed_through_and_capped_at_1000():
+    cliente = FakeElevenLabs()
+    muchos_terminos = [f"termino{i}" for i in range(1200)]
+
+    transcribir_bytes(b"audio-bytes-fake", cliente=cliente, keyterms=muchos_terminos)
+
+    kwargs = cliente.speech_to_text.calls[0]
+    assert len(kwargs["keyterms"]) == 1000
+    assert kwargs["keyterms"][0] == "termino0"
+
+
+def test_empty_keyterms_not_sent():
+    cliente = FakeElevenLabs()
+
+    transcribir_bytes(b"audio-bytes-fake", cliente=cliente, keyterms=[])
+
+    assert "keyterms" not in cliente.speech_to_text.calls[0]
+
+
+def test_api_failure_wrapped_in_error_transcripcion():
+    cliente = FakeElevenLabs(error=RuntimeError("401 unauthorized"))
+
+    with pytest.raises(ErrorTranscripcion):
+        transcribir_bytes(b"audio-bytes-fake", cliente=cliente)
+
+
+def test_custom_modelo_and_idioma_forwarded():
+    cliente = FakeElevenLabs()
+
+    transcribir_bytes(
+        b"audio-bytes-fake", cliente=cliente, modelo="scribe_v1", idioma="en"
     )
 
-    valores = []
-    transcribir_bytes(b"audio-bytes-fake", on_progress=valores.append)
-
-    assert valores == sorted(valores)
-    assert all(0.0 <= v <= 1.0 for v in valores)
-    assert valores[-1] == 1.0
-
-
-def test_missing_av_raises_error_dependencia_audio(monkeypatch):
-    import importlib.util as real_importlib_util
-
-    def fake_find_spec(name):
-        if name == "av":
-            return None
-        return real_importlib_util.find_spec(name)
-
-    monkeypatch.setattr(transcribir.importlib.util, "find_spec", fake_find_spec)
-
-    with pytest.raises(ErrorDependenciaAudio):
-        transcribir.verificar_dependencias()
+    kwargs = cliente.speech_to_text.calls[0]
+    assert kwargs["model_id"] == "scribe_v1"
+    assert kwargs["language_code"] == "en"
