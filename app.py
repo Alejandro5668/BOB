@@ -18,12 +18,14 @@ Transcription now calls the ElevenLabs API (see CLAUDE.md "Transcription
 provider" decision) instead of local faster-whisper — a single blocking
 call, not a segment-by-segment stream, so there's no per-percentage
 progress to show; `st.status(...)` communicates "still working" instead.
-Known module names/aliases are passed as `keyterms` to bias recognition
-toward domain vocabulary (e.g. "gestión de riesgos").
+Known document/folder names are passed as `keyterms` to bias recognition
+toward domain vocabulary.
 
-Visual pass: navy/teal gradient palette + Sora font, inspired by (not a
-pixel-perfect clone of) dapta.ai's landing page — purely cosmetic, no
-functional/state changes below the CSS block.
+Visual pass: dark background + lime accent (see `.streamlit/config.toml`)
+and Inter typography, following a reference design the user provided.
+All copy is neutral Spanish (no voseo, no regionalisms) with no
+decorative/generic icons — purely cosmetic, no functional/state changes
+below the CSS block.
 """
 
 import streamlit as st
@@ -47,83 +49,67 @@ from transcribir import (
 
 load_dotenv()
 
-st.set_page_config(page_title="BOB — Contame el problema", page_icon="🎙️")
+st.set_page_config(page_title="BOB")
 
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800;900&display=swap');
 
     html, body, [class*="css"] {
-        font-family: 'Sora', sans-serif;
+        font-family: 'Inter', sans-serif;
     }
 
-    div[data-testid="stAppViewContainer"] {
-        background: linear-gradient(180deg, #F4F8FB 0%, #FFFFFF 45%);
-    }
-
-    .bob-hero {
-        display: flex;
-        align-items: center;
-        gap: 0.9rem;
-        margin-bottom: 0.25rem;
-    }
-    .bob-hero-badge {
-        font-size: 2.2rem;
-        line-height: 1;
-    }
-    .bob-hero-title {
-        font-weight: 800;
-        font-size: 2.1rem;
-        background: linear-gradient(90deg, #0B1E3F 0%, #0E7C86 60%, #14B8A6 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin: 0;
-    }
-    .bob-hero-tagline {
-        color: #4A5568;
-        font-size: 1.05rem;
-        margin: 0.1rem 0 1.6rem 0;
-    }
-
-    .bob-step-card {
-        background: #FFFFFF;
-        border: 1px solid #E3ECF2;
-        border-radius: 16px;
-        padding: 1.1rem 1.4rem 0.4rem 1.4rem;
-        margin-bottom: 1.2rem;
-        box-shadow: 0 4px 18px rgba(11, 30, 63, 0.05);
-    }
-    .bob-step-title {
+    .bob-eyebrow {
+        color: #C6F135;
         font-weight: 700;
-        font-size: 1.15rem;
-        color: #0B1E3F;
+        font-size: 0.8rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-bottom: 0.4rem;
+    }
+    .bob-title {
+        font-weight: 900;
+        font-size: 2.4rem;
+        line-height: 1.15;
+        color: #FFFFFF;
+        margin: 0 0 0.9rem 0;
+    }
+    .bob-title-accent {
+        color: #C6F135;
+    }
+    .bob-subtitle {
+        color: #9CA3AF;
+        font-size: 1.02rem;
+        line-height: 1.5;
+        margin-bottom: 1.8rem;
+        max-width: 44rem;
+    }
+
+    .bob-card {
+        background: #18181A;
+        border: 1px solid #2A2A2C;
+        border-radius: 14px;
+        padding: 1.1rem 1.4rem 0.4rem 1.4rem;
+        margin-bottom: 1.1rem;
+    }
+    .bob-card-title {
+        font-weight: 800;
+        font-size: 1.1rem;
+        color: #FFFFFF;
         margin-bottom: 0.15rem;
     }
-    .bob-step-subtitle {
-        color: #6B7C8E;
-        font-size: 0.92rem;
+    .bob-card-subtitle {
+        color: #9CA3AF;
+        font-size: 0.9rem;
         margin-bottom: 0.7rem;
     }
 
     div[data-testid="stButton"] button {
-        font-size: 1.15rem;
-        font-weight: 700;
-        padding: 0.75rem 1.5rem;
-        border-radius: 12px;
-    }
-    div[data-testid="stButton"] button[kind="primary"] {
-        background: linear-gradient(90deg, #0E7C86 0%, #14B8A6 100%);
-        border: none;
-    }
-    div[data-testid="stButton"] button[kind="primary"]:hover {
-        background: linear-gradient(90deg, #0B6870 0%, #10A090 100%);
-    }
-    div[data-testid="stAudioInput"] button {
-        transform: scale(1.2);
-    }
-    div[data-testid="stAudioInput"] {
-        border-radius: 12px;
+        font-weight: 800;
+        font-size: 1.05rem;
+        padding: 0.7rem 1.5rem;
+        border-radius: 10px;
     }
     </style>
     """,
@@ -132,13 +118,13 @@ st.markdown(
 
 st.markdown(
     """
-    <div class="bob-hero">
-        <div class="bob-hero-badge">🎙️</div>
-        <p class="bob-hero-title">BOB escucha el problema</p>
-    </div>
-    <p class="bob-hero-tagline">
-        Contame lo que te dijo el cliente — yo transcribo, busco el módulo
-        involucrado y te dejo la descripción lista para pegar en Jira.
+    <p class="bob-eyebrow">Asistente de voz para analistas</p>
+    <p class="bob-title">Del audio a la descripción,
+        <span class="bob-title-accent">lista para Jira</span></p>
+    <p class="bob-subtitle">
+        El audio se transcribe, se identifica el módulo afectado y se
+        redacta una descripción clara del problema, sin necesidad de
+        escribir el ticket de forma manual.
     </p>
     """,
     unsafe_allow_html=True,
@@ -153,10 +139,10 @@ if "ultimo_audio_id" not in st.session_state:
 
 st.markdown(
     """
-    <div class="bob-step-card">
-        <div class="bob-step-title">🎤 Dale, contame</div>
-        <div class="bob-step-subtitle">
-            Grabá la descripción del problema tal como te la contó el cliente.
+    <div class="bob-card">
+        <div class="bob-card-title">Grabación de audio</div>
+        <div class="bob-card-subtitle">
+            La transcripción se genera automáticamente al finalizar la grabación.
         </div>
     </div>
     """,
@@ -167,7 +153,7 @@ grabacion = st.audio_input("Grabación", label_visibility="collapsed")
 if grabacion is not None and grabacion.file_id != st.session_state.ultimo_audio_id:
     st.session_state.ultimo_audio_id = grabacion.file_id
     try:
-        with st.status("Escuchando con atención...", expanded=True):
+        with st.status("Procesando el audio...", expanded=True):
             texto = transcribir_bytes(
                 grabacion.read(), keyterms=nombres_conocidos()
             )
@@ -179,10 +165,10 @@ if grabacion is not None and grabacion.file_id != st.session_state.ultimo_audio_
 
 st.markdown(
     """
-    <div class="bob-step-card">
-        <div class="bob-step-title">📝 ¿Quedó bien?</div>
-        <div class="bob-step-subtitle">
-            Revisá y corregí lo que haga falta antes de armar el ticket.
+    <div class="bob-card">
+        <div class="bob-card-title">Transcripción</div>
+        <div class="bob-card-subtitle">
+            El texto puede corregirse antes de generar la descripción.
         </div>
     </div>
     """,
@@ -197,10 +183,10 @@ st.session_state.transcripcion = st.text_area(
 
 transcripcion_vacia = not st.session_state.transcripcion.strip()
 if transcripcion_vacia:
-    st.warning("Todavía no grabaste nada — dale al micrófono cuando quieras.")
+    st.warning("Aún no se ha registrado ningún audio.")
 
 if st.button(
-    "✨ Armar la descripción",
+    "Generar descripción",
     disabled=transcripcion_vacia,
     type="primary",
     use_container_width=True,
@@ -209,7 +195,7 @@ if st.button(
     if aviso_memoria:
         st.info(aviso_memoria)
     try:
-        with st.spinner("Armando la descripción..."):
+        with st.spinner("Generando la descripción..."):
             st.session_state.descripcion = generar_descripcion(
                 st.session_state.transcripcion
             )
@@ -220,10 +206,10 @@ if st.button(
 
 st.markdown(
     """
-    <div class="bob-step-card">
-        <div class="bob-step-title">🚀 Lista para Jira</div>
-        <div class="bob-step-subtitle">
-            Copiala y pegala en el ticket. También podés retocarla acá.
+    <div class="bob-card">
+        <div class="bob-card-title">Descripción para Jira</div>
+        <div class="bob-card-subtitle">
+            El texto puede editarse antes de copiarlo al ticket.
         </div>
     </div>
     """,

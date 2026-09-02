@@ -41,8 +41,8 @@ def _crear_cliente():
     if not clave:
         logger.warning("ELEVENLABS_API_KEY ausente o vacía al intentar transcribir audio.")
         raise ErrorConfiguracionAudio(
-            "ELEVENLABS_API_KEY no está configurada. Define la variable de entorno "
-            "(ver .env.example) antes de grabar audio."
+            "ELEVENLABS_API_KEY no está configurada. Debe definirse la variable de "
+            "entorno (ver .env.example) antes de registrar audio."
         )
 
     from elevenlabs import ElevenLabs
