@@ -8,48 +8,44 @@ documentation folder has neither (see CLAUDE.md "Context retrieval
 decision" for why).
 
 Every `.md` file found anywhere under `MEMORY_DIR` is a candidate. Instead
-of our own lexical scoring heuristic, Groq itself picks which files (if
-any) are relevant to a transcript, given a lightweight file listing —
-leaning on the model's judgment rather than a fixed matching algorithm.
+of our own lexical scoring heuristic, Claude Haiku 4.5 itself picks which
+files (if any) are relevant to a transcript, given a lightweight file
+listing — leaning on the model's judgment rather than a fixed matching
+algorithm.
 
 Never imports Streamlit (see spec "Standalone Testable Module"). Never
 writes, creates, or deletes anything under `MEMORY_DIR`: only `is_dir`,
 `is_file`, `rglob`, `resolve`, and `read_text` are used.
 
-The raw content of the finally-selected documents is passed through
-`contexto_enriquecido.enriquecer_documentos` before assembly, turning each
-developer-oriented `.md` into a short functional summary for the analyst
-(see `contexto_enriquecido.py`). Enrichment is total and degrades to the
-verbatim raw content on any failure — it never blocks or empties this
-module's own total-provider contract.
+The verbatim raw content of the finally-selected documents is assembled
+directly into the context block, in selection order — no enrichment or
+summarization step (see `cliente_anthropic.py`'s module docstring: the
+same model that would have enriched a document now reads its full raw
+content directly, so a lossy intermediate summary added cost and
+completeness loss without benefit).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Callable, Optional
 
+from cliente_anthropic import MODELO_HAIKU, _crear_cliente, _pedir_json
+
 logger = logging.getLogger(__name__)
 
-PRESUPUESTO_CARACTERES = 6000
+PRESUPUESTO_CARACTERES = 120_000
 MARCADOR_TRUNCADO = "[contenido truncado]"
 
 MAX_DOCUMENTOS_LISTADOS = 500  # safety valve on listing size, not a schema requirement
 MAX_ARCHIVOS_SELECCIONADOS = 3
 LONGITUD_VISTA_PREVIA = 160
 
-# gpt-oss models reason internally before answering, and those reasoning
-# tokens count against max_tokens — confirmed live: a 200-token cap cut the
-# reasoning off mid-thought, leaving an empty completion Groq's JSON mode
-# then rejected as invalid (400). reasoning_effort="low" cuts that
-# reasoning-token cost by ~10x (measured 227 -> 14 tokens on a real batch).
-MODELO_SELECTOR = "openai/gpt-oss-20b"  # cheaper/faster than the generation model
+MODELO_SELECTOR = MODELO_HAIKU
 
 ProveedorContexto = Callable[[str], str]
-Enriquecedor = Callable[[list[tuple[str, str]]], list[str]]
 
 
 class ErrorMemoria(RuntimeError):
@@ -216,13 +212,12 @@ def _ensamblar_contexto(bloques: list[str], presupuesto: int) -> str:
     return separador.join(resultado)
 
 
-# --- Groq-assisted relevance selection --------------------------------------
+# --- Haiku-assisted relevance selection --------------------------------------
 
-# Real corpora (e.g. the actual Kawak PHP docs, 273 files) can exceed
-# Groq's free-tier TPM limit for MODELO_SELECTOR in a single request
-# (confirmed live: gpt-oss-20b free tier is 8000 TPM; a 273-doc listing at
-# the old preview length needed ~14000). The listing is chunked into
-# batches so this scales to a corpus of any size, not just today's.
+# Real corpora (e.g. the actual Kawak PHP docs, 273 files) can exceed a
+# single request's practical size for MODELO_SELECTOR. The listing is
+# chunked into batches so this scales to a corpus of any size, not just
+# today's. (Left conservative on purpose — see design.md Open Questions.)
 CARACTERES_POR_LOTE = 12000
 
 
@@ -250,36 +245,27 @@ def _lotes_de_documentos(documentos: list[tuple[str, str]], presupuesto: Optiona
 
 
 def _preguntar_selector(transcripcion: str, documentos: list[tuple[str, str]], cliente) -> list[str]:
-    """One Groq call over a single (already budget-sized) document listing."""
-    from generar_descripcion import _crear_completion_con_reintento
+    """One Claude Haiku 4.5 call over a single (already budget-sized) document listing."""
     from prompts import ENTRADA_SELECTOR_DOCUMENTOS, SELECTOR_DOCUMENTOS_RELEVANTES
 
-    respuesta = _crear_completion_con_reintento(
+    datos = _pedir_json(
         cliente,
         model=MODELO_SELECTOR,
-        messages=[
-            {"role": "system", "content": SELECTOR_DOCUMENTOS_RELEVANTES},
-            {
-                "role": "user",
-                "content": ENTRADA_SELECTOR_DOCUMENTOS.format(
-                    transcripcion=transcripcion,
-                    listado=_construir_listado(documentos),
-                ),
-            },
-        ],
-        temperature=0.0,
+        system=SELECTOR_DOCUMENTOS_RELEVANTES,
+        mensaje_usuario=ENTRADA_SELECTOR_DOCUMENTOS.format(
+            transcripcion=transcripcion,
+            listado=_construir_listado(documentos),
+        ),
         max_tokens=500,
-        reasoning_effort="low",
-        response_format={"type": "json_object"},
     )
-    datos = json.loads(respuesta.choices[0].message.content)
     return datos.get("archivos", [])
 
 
 def elegir_documentos_relevantes(
     transcripcion: str, documentos: list[tuple[str, str]], cliente
 ) -> list[str]:
-    """Ask Groq which of `documentos` (if any) are relevant to `transcripcion`.
+    """Ask Claude Haiku 4.5 which of `documentos` (if any) are relevant to
+    `transcripcion`.
 
     The listing is sent in budget-bounded batches (see `CARACTERES_POR_LOTE`)
     — every batch is scanned (no early stop: a batch is evaluated in
@@ -322,21 +308,16 @@ def buscar_contexto(
     *,
     directorio: Optional[str] = None,
     cliente=None,
-    enriquecedor: Optional[Enriquecedor] = None,
 ) -> str:
     """Total provider: returns bounded document context, or `""`. Never raises.
 
-    `cliente` is injected for testing; when None, resolves lazily to
-    `generar_descripcion._crear_cliente()` (same lazy-fail-on-missing-key
-    behavior as the generation client).
+    `cliente` is injected for testing/sharing; when None, resolves lazily
+    to `cliente_anthropic._crear_cliente()` (fails fast on a missing/blank
+    `ANTHROPIC_API_KEY`, which is caught here and degrades to `""`).
 
-    `enriquecedor` is injected for testing; when None, resolves lazily to
-    `contexto_enriquecido.enriquecer_documentos` (a total function that
-    degrades to raw content on any failure — see that module). The
-    enricher receives `(ruta_relativa, contenido_crudo)` pairs in selection
-    order and must return one block per input, same order; a broken or
-    injected enricher that violates that contract degrades this call to
-    the raw blocks instead, never to `""`.
+    Selected documents' raw content is read verbatim, in selection order,
+    and assembled directly into the context block under
+    `PRESUPUESTO_CARACTERES` — no enrichment/summarization step.
     """
     try:
         documentos = listar_documentos(directorio)
@@ -344,8 +325,6 @@ def buscar_contexto(
             return ""
 
         if cliente is None:
-            from generar_descripcion import _crear_cliente
-
             cliente = _crear_cliente()
 
         seleccionados = elegir_documentos_relevantes(transcripcion, documentos, cliente)
@@ -353,34 +332,16 @@ def buscar_contexto(
             return ""
 
         raiz = resolver_directorio(directorio)
-        pares: list[tuple[str, str]] = []
+        bloques: list[str] = []
         for ruta_relativa in seleccionados:
             try:
                 contenido = (raiz / ruta_relativa).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            pares.append((ruta_relativa, contenido))
+            bloques.append(contenido)
 
-        if not pares:
+        if not bloques:
             return ""
-
-        if enriquecedor is None:
-            from contexto_enriquecido import enriquecer_documentos as enriquecedor
-
-        # Defense in depth: `enriquecer_documentos` is total by contract, but a
-        # broken/injected enricher must degrade to raw blocks, never to "".
-        try:
-            bloques = enriquecedor(pares)
-            if len(bloques) != len(pares):
-                raise ValueError(
-                    f"El enriquecedor devolvió {len(bloques)} bloques para {len(pares)} documentos"
-                )
-        except Exception as exc:
-            logger.warning(
-                "Enriquecimiento no utilizable, se usa documentación cruda: %s: %s",
-                type(exc).__name__, exc,
-            )
-            bloques = [contenido for _, contenido in pares]
 
         return _ensamblar_contexto(bloques, PRESUPUESTO_CARACTERES)
     except Exception as exc:

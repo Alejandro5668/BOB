@@ -1,6 +1,5 @@
 streamlit>=1.40
 elevenlabs>=2.0
-groq>=0.11
 anthropic>=1.3
 python-dotenv
 pytest

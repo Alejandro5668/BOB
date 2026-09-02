@@ -1,5 +1,5 @@
 """Unit tests for contexto_memoria.py — schema-free discovery, budget,
-path-safety, and Groq-assisted relevance selection.
+path-safety, and Claude Haiku 4.5-assisted relevance selection.
 
 `memory/` under `MEMORY_DIR` is treated as ANY folder of .md documentation
 (no fixed index file, no required subfolder layout) — see CLAUDE.md
@@ -7,6 +7,7 @@ path-safety, and Groq-assisted relevance selection.
 rather than relying on any particular real-world layout.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,28 +19,23 @@ import contexto_memoria as cm
 def _sin_clave_anthropic(monkeypatch):
     """Belt-and-braces guard: no test in this file should ever be able to
     reach the real Anthropic network, even if `buscar_contexto`'s default
-    lazy enricher import is exercised by accident (every test here injects
-    `cliente=`, and enrichment tests inject `enriquecedor=` too, but this
-    stays as a second line of defense — no conftest.py exists in this repo)."""
+    lazy client import is exercised by accident (every test here injects
+    `cliente=`, but this stays as a second line of defense — no
+    conftest.py exists in this repo)."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
-class FakeMessage:
-    def __init__(self, content):
-        self.content = content
+class FakeBloqueTexto:
+    def __init__(self, text):
+        self.type, self.text = "text", text
 
 
-class FakeChoice:
-    def __init__(self, content):
-        self.message = FakeMessage(content)
+class FakeMensaje:
+    def __init__(self, text):
+        self.content = [FakeBloqueTexto(text)]
 
 
-class FakeResponse:
-    def __init__(self, content):
-        self.choices = [FakeChoice(content)]
-
-
-class FakeCompletions:
+class FakeMessages:
     def __init__(self, archivos_elegidos=None, error=None):
         self.calls = []
         self._archivos_elegidos = archivos_elegidos if archivos_elegidos is not None else []
@@ -49,22 +45,16 @@ class FakeCompletions:
         self.calls.append(kwargs)
         if self._error is not None:
             raise self._error
-        import json
+        # prefill-shaped: canned text is the JSON object minus its leading "{"
+        return FakeMensaje(json.dumps({"archivos": self._archivos_elegidos})[1:])
 
-        return FakeResponse(json.dumps({"archivos": self._archivos_elegidos}))
 
-
-class FakeChat:
+class FakeAnthropic:
     def __init__(self, archivos_elegidos=None, error=None):
-        self.completions = FakeCompletions(archivos_elegidos, error)
+        self.messages = FakeMessages(archivos_elegidos, error)
 
 
-class FakeGroq:
-    def __init__(self, archivos_elegidos=None, error=None):
-        self.chat = FakeChat(archivos_elegidos, error)
-
-
-class FakeCompletionsSecuencia:
+class FakeMessagesSecuencia:
     """Returns a different canned `archivos` response per call, in order —
     for testing multi-batch / final cross-batch selection behavior."""
 
@@ -74,14 +64,12 @@ class FakeCompletionsSecuencia:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        import json
-
-        return FakeResponse(json.dumps({"archivos": self._respuestas.pop(0)}))
+        return FakeMensaje(json.dumps({"archivos": self._respuestas.pop(0)})[1:])
 
 
-class FakeGroqSecuencia:
+class FakeAnthropicSecuencia:
     def __init__(self, respuestas):
-        self.chat = type("Chat", (), {"completions": FakeCompletionsSecuencia(respuestas)})()
+        self.messages = FakeMessagesSecuencia(respuestas)
 
 
 def _crear_arbol(raiz: Path, archivos: dict) -> Path:
@@ -226,17 +214,17 @@ def test_diagnosticar_returns_spanish_notice_when_missing():
     assert "memoria" in aviso.lower() or "transcripción" in aviso.lower()
 
 
-# --- elegir_documentos_relevantes: Groq-assisted selection -------------------
+# --- elegir_documentos_relevantes: Haiku-assisted selection -------------------
 
 
 def test_elegir_documentos_relevantes_returns_empty_for_empty_listing():
-    cliente = FakeGroq()
+    cliente = FakeAnthropic()
     assert cm.elegir_documentos_relevantes("transcripción", [], cliente) == []
 
 
 def test_elegir_documentos_relevantes_filters_to_known_paths(tmp_path):
     documentos = [("real.md", "vista"), ("otro_real.md", "vista")]
-    cliente = FakeGroq(archivos_elegidos=["real.md", "inventado_por_el_modelo.md"])
+    cliente = FakeAnthropic(archivos_elegidos=["real.md", "inventado_por_el_modelo.md"])
 
     seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
 
@@ -245,7 +233,7 @@ def test_elegir_documentos_relevantes_filters_to_known_paths(tmp_path):
 
 def test_elegir_documentos_relevantes_caps_at_max_archivos():
     documentos = [(f"doc{i}.md", "vista") for i in range(10)]
-    cliente = FakeGroq(archivos_elegidos=[f"doc{i}.md" for i in range(10)])
+    cliente = FakeAnthropic(archivos_elegidos=[f"doc{i}.md" for i in range(10)])
 
     seleccionados = cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
 
@@ -254,14 +242,14 @@ def test_elegir_documentos_relevantes_caps_at_max_archivos():
 
 def test_elegir_documentos_relevantes_batches_large_listings(tmp_path):
     """A listing larger than CARACTERES_POR_LOTE must split into multiple
-    Groq calls — confirmed against a real 273-file corpus that exceeded
-    Groq's free-tier TPM limit in a single request."""
+    calls — confirmed against a real 273-file corpus that exceeded the
+    selector's practical single-request size."""
     documentos = [(f"doc{i}.md", "x" * 100) for i in range(300)]
-    cliente = FakeGroq(archivos_elegidos=[])
+    cliente = FakeAnthropic(archivos_elegidos=[])
 
     cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
 
-    assert len(cliente.chat.completions.calls) > 1
+    assert len(cliente.messages.calls) > 1
 
 
 def test_elegir_documentos_relevantes_scans_every_batch_no_early_stop(tmp_path):
@@ -274,11 +262,11 @@ def test_elegir_documentos_relevantes_scans_every_batch_no_early_stop(tmp_path):
     documentos = [(f"doc{i}.md", "x" * 100) for i in range(300)]
     # Same 3 (deduplicated) picks every batch — if early-stop were still
     # in effect, only 1 call would happen; it must not be.
-    cliente = FakeGroq(archivos_elegidos=["doc0.md", "doc1.md", "doc2.md"])
+    cliente = FakeAnthropic(archivos_elegidos=["doc0.md", "doc1.md", "doc2.md"])
 
     cm.elegir_documentos_relevantes("transcripción", documentos, cliente)
 
-    assert len(cliente.chat.completions.calls) > 1
+    assert len(cliente.messages.calls) > 1
 
 
 def test_elegir_documentos_relevantes_final_call_corrects_early_false_positive(monkeypatch):
@@ -294,7 +282,7 @@ def test_elegir_documentos_relevantes_final_call_corrects_early_false_positive(m
         ("el_correcto.md", "y" * 40),
         ("tambien_valido.md", "y" * 40),
     ]
-    cliente = FakeGroqSecuencia(
+    cliente = FakeAnthropicSecuencia(
         [
             ["falso_positivo.md", "otro_de_lote_uno.md"],  # batch 1: 2 picks
             ["el_correcto.md", "tambien_valido.md"],  # batch 2: 2 more -> 4 total, over the cap
@@ -306,20 +294,19 @@ def test_elegir_documentos_relevantes_final_call_corrects_early_false_positive(m
 
     assert "falso_positivo.md" not in seleccionados
     assert seleccionados == ["el_correcto.md", "tambien_valido.md", "otro_de_lote_uno.md"]
-    assert len(cliente.chat.completions.calls) == 3
+    assert len(cliente.messages.calls) == 3
 
 
 def test_elegir_documentos_relevantes_sends_listing_and_transcript(tmp_path):
     documentos = [("modulo/index.md", "resumen breve")]
-    cliente = FakeGroq(archivos_elegidos=[])
+    cliente = FakeAnthropic(archivos_elegidos=[])
     transcripcion = "El cliente reporta un error en el módulo."
 
     cm.elegir_documentos_relevantes(transcripcion, documentos, cliente)
 
-    kwargs = cliente.chat.completions.calls[0]
+    kwargs = cliente.messages.calls[0]
     assert kwargs["model"] == cm.MODELO_SELECTOR
-    assert kwargs["response_format"] == {"type": "json_object"}
-    user_msg = kwargs["messages"][1]["content"]
+    user_msg = kwargs["messages"][0]["content"]
     assert transcripcion in user_msg
     assert "modulo/index.md" in user_msg
     assert "resumen breve" in user_msg
@@ -331,76 +318,66 @@ def test_elegir_documentos_relevantes_sends_listing_and_transcript(tmp_path):
 def test_buscar_contexto_empty_when_no_documents(tmp_path):
     raiz = tmp_path / "memory"
     raiz.mkdir()
-    cliente = FakeGroq()
+    cliente = FakeAnthropic()
 
     assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
-    assert cliente.chat.completions.calls == []  # never called with nothing to pick from
+    assert cliente.messages.calls == []  # never called with nothing to pick from
 
 
 def test_buscar_contexto_empty_when_selector_picks_nothing(tmp_path):
     raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
-    cliente = FakeGroq(archivos_elegidos=[])
+    cliente = FakeAnthropic(archivos_elegidos=[])
 
     assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
 
 
-def test_buscar_contexto_uses_enriched_summary_instead_of_raw_content(tmp_path):
+def test_buscar_contexto_returns_selected_file_content_verbatim(tmp_path):
     raiz = _crear_arbol(
         tmp_path / "memory",
         {"riesgos/index.md": "Documentación real de riesgos.", "otro.md": "irrelevante"},
     )
-    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
-    recibidos = []
+    cliente = FakeAnthropic(archivos_elegidos=["riesgos/index.md"])
 
-    def enriquecedor(pares):
-        recibidos.extend(pares)
-        return [f"RESUMEN de {ruta}" for ruta, _ in pares]
+    contexto = cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente)
 
-    contexto = cm.buscar_contexto(
-        "transcripción", directorio=str(raiz), cliente=cliente, enriquecedor=enriquecedor
-    )
-
-    assert contexto == "RESUMEN de riesgos/index.md"
-    # The enricher receives (ruta_relativa, contenido_crudo) pairs in selection order.
-    assert recibidos == [("riesgos/index.md", "Documentación real de riesgos.")]
+    assert contexto == "Documentación real de riesgos."
 
 
-def test_buscar_contexto_falls_back_to_raw_content_when_enricher_fails(tmp_path):
-    raiz = _crear_arbol(tmp_path / "memory", {"riesgos/index.md": "Documentación real de riesgos."})
-    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
+def test_buscar_contexto_concatenates_selected_docs_in_selection_order(tmp_path):
+    raiz = _crear_arbol(tmp_path / "memory", {"a.md": "Contenido A.", "b.md": "Contenido B."})
+    cliente = FakeAnthropic(archivos_elegidos=["b.md", "a.md"])
 
-    def enriquecedor(pares):
-        raise RuntimeError("fallo simulado de enriquecimiento")
+    contexto = cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente)
 
-    contexto = cm.buscar_contexto(
-        "transcripción", directorio=str(raiz), cliente=cliente, enriquecedor=enriquecedor
-    )
-
-    assert contexto == "Documentación real de riesgos."  # degrades to raw, never to ""
+    assert contexto == "Contenido B.\n\nContenido A."
 
 
-def test_buscar_contexto_falls_back_to_raw_content_on_enricher_length_mismatch(tmp_path):
-    raiz = _crear_arbol(tmp_path / "memory", {"riesgos/index.md": "Documentación real de riesgos."})
-    cliente = FakeGroq(archivos_elegidos=["riesgos/index.md"])
+def test_buscar_contexto_injects_a_large_document_whole_under_the_new_budget(tmp_path):
+    contenido_grande = "x" * 40_000
+    raiz = _crear_arbol(tmp_path / "memory", {"grande.md": contenido_grande})
+    cliente = FakeAnthropic(archivos_elegidos=["grande.md"])
 
-    contexto = cm.buscar_contexto(
-        "transcripción",
-        directorio=str(raiz),
-        cliente=cliente,
-        enriquecedor=lambda pares: [],
-    )
+    contexto = cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente)
 
-    assert contexto == "Documentación real de riesgos."  # never ""
+    assert contexto == contenido_grande
+    assert cm.MARCADOR_TRUNCADO not in contexto
 
 
 def test_buscar_contexto_degrades_to_empty_on_missing_directory():
-    cliente = FakeGroq()
+    cliente = FakeAnthropic()
     assert cm.buscar_contexto("transcripción", directorio="ruta/que/no/existe", cliente=cliente) == ""
+
+
+def test_buscar_contexto_degrades_to_empty_when_key_missing_and_no_client_injected(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
+
+    assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=None) == ""
 
 
 def test_buscar_contexto_degrades_to_empty_on_selector_failure(tmp_path):
     raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
-    cliente = FakeGroq(error=RuntimeError("fallo de red simulado"))
+    cliente = FakeAnthropic(error=RuntimeError("fallo de red simulado"))
 
     assert cm.buscar_contexto("transcripción", directorio=str(raiz), cliente=cliente) == ""
 
@@ -408,13 +385,13 @@ def test_buscar_contexto_degrades_to_empty_on_selector_failure(tmp_path):
 def test_buscar_contexto_never_raises_on_malformed_json(tmp_path):
     raiz = _crear_arbol(tmp_path / "memory", {"doc.md": "contenido"})
 
-    class CompletionsRespuestaInvalida:
+    class MessagesRespuestaInvalida:
         def create(self, **kwargs):
-            return FakeResponse("esto no es json")
+            return FakeMensaje("esto no es json")
 
     class ClienteRespuestaInvalida:
         def __init__(self):
-            self.chat = type("Chat", (), {"completions": CompletionsRespuestaInvalida()})()
+            self.messages = MessagesRespuestaInvalida()
 
     assert cm.buscar_contexto(
         "transcripción", directorio=str(raiz), cliente=ClienteRespuestaInvalida()
