@@ -1,0 +1,14 @@
+change: asistente-voz-fase3
+artifact_store: hybrid
+delivery_strategy: size:exception (single-pr, actual ~634 lines, re-confirmed by user after apply exceeded the initial ~400-450 estimate)
+review_budget_lines: 400
+phases:
+  explore: done
+  proposal: done
+  spec: done
+  design: done
+  tasks: done
+  apply: done (23/23, 118/118 tests passing, diff ~634 lines re-confirmed by user)
+  verify: done (pass with warnings, 0 critical)
+  archive: pending
+next_recommended: sdd-archive

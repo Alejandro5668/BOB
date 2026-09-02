@@ -1,15 +1,27 @@
 """Unit tests for generar_descripcion.py — FakeGroq client, no network calls."""
 
+import ast
+from pathlib import Path
+
 import groq as groq_module
 import pytest
 
 from generar_descripcion import (
+    AVISO_RESULTADO_NO_CONFIABLE,
+    ENCABEZADO_RESULTADO,
+    FRASES_GENERICAS,
     MODELO,
-    PLANTILLA_USUARIO,
-    SYSTEM_PROMPT,
-    SYSTEM_PROMPT_CON_CONTEXTO,
     ErrorConfiguracion,
+    es_relleno_generico,
     generar_descripcion,
+    postprocesar_descripcion,
+)
+from prompts import (
+    ENTRADA_GENERADOR_DESCRIPCION,
+    ENTRADA_GENERADOR_DESCRIPCION_CON_CONTEXTO,
+    GENERADOR_DESCRIPCION_TICKET,
+    GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO,
+    PLANTILLA_TICKET_JIRA,
 )
 
 
@@ -39,13 +51,16 @@ class FakeCompletions:
 
 
 class FakeChat:
-    def __init__(self):
-        self.completions = FakeCompletions()
+    def __init__(self, respuesta="Descripción generada de prueba"):
+        self.completions = FakeCompletions(respuesta)
 
 
 class FakeGroq:
-    def __init__(self):
-        self.chat = FakeChat()
+    def __init__(self, respuesta="Descripción generada de prueba"):
+        self.chat = FakeChat(respuesta)
+
+
+# --- Fase 1/2 regression: fail-fast + request shape -----------------------
 
 
 def test_missing_key_raises_error_configuracion_before_any_call(monkeypatch):
@@ -92,17 +107,17 @@ def test_generar_descripcion_with_injected_client(monkeypatch):
     system_msg = mensajes[0]["content"]
     user_msg = mensajes[1]["content"]
 
-    # Rule 4: no implementation-detail speculation.
+    # Rule 9: no implementation-detail speculation.
     assert "PROHIBIDO mencionar o suponer detalles de implementación" in system_msg
-    # Rule 5: no technical-cause diagnosis.
+    # Rule 10: no technical-cause diagnosis.
     assert "PROHIBIDO diagnosticar la causa técnica" in system_msg
     # Transcript is sent verbatim, bounded by --- delimiters.
     assert transcripcion in user_msg
     assert "---" in user_msg
 
 
-def test_no_context_provider_sends_byte_identical_fase1_prompt(monkeypatch):
-    """`proveedor_contexto` returning "" must be indistinguishable from Fase 1."""
+def test_no_context_provider_sends_byte_identical_prompt(monkeypatch):
+    """`proveedor_contexto` returning "" must select the no-context prompt pair."""
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     cliente = FakeGroq()
@@ -119,12 +134,12 @@ def test_no_context_provider_sends_byte_identical_fase1_prompt(monkeypatch):
     system_msg = kwargs["messages"][0]["content"]
     user_msg = kwargs["messages"][1]["content"]
 
-    assert system_msg == SYSTEM_PROMPT
-    assert user_msg == PLANTILLA_USUARIO.format(transcripcion=transcripcion)
+    assert system_msg == GENERADOR_DESCRIPCION_TICKET
+    assert user_msg == ENTRADA_GENERADOR_DESCRIPCION.format(transcripcion=transcripcion)
     assert "===" not in user_msg
 
 
-def test_context_provider_with_match_uses_system_prompt_con_contexto(monkeypatch):
+def test_context_provider_with_match_uses_prompt_con_contexto(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     cliente = FakeGroq()
@@ -142,8 +157,8 @@ def test_context_provider_with_match_uses_system_prompt_con_contexto(monkeypatch
     system_msg = kwargs["messages"][0]["content"]
     user_msg = kwargs["messages"][1]["content"]
 
-    assert system_msg == SYSTEM_PROMPT_CON_CONTEXTO
-    assert system_msg.startswith(SYSTEM_PROMPT)
+    assert system_msg == GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert system_msg.startswith(GENERADOR_DESCRIPCION_TICKET)
     assert "PROHIBIDO presentar contenido del contexto" in system_msg
 
     # Context block uses === delimiters (distinct from the --- transcript
@@ -188,4 +203,292 @@ def test_default_context_provider_is_contexto_memoria_buscar_contexto(monkeypatc
 
     assert resultado == "Descripción generada de prueba"
     kwargs = cliente.chat.completions.calls[0]
-    assert kwargs["messages"][0]["content"] == SYSTEM_PROMPT
+    assert kwargs["messages"][0]["content"] == GENERADOR_DESCRIPCION_TICKET
+
+
+# --- Template shape: prompt content ----------------------------------------
+
+
+@pytest.mark.parametrize("prompt", [GENERADOR_DESCRIPCION_TICKET, GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO])
+def test_system_prompts_embed_plantilla_ticket_jira_verbatim(prompt):
+    assert PLANTILLA_TICKET_JIRA in prompt
+
+
+@pytest.mark.parametrize("prompt", [GENERADOR_DESCRIPCION_TICKET, GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO])
+def test_template_headings_appear_in_fixed_order(prompt):
+    encabezados = [
+        "## Módulo afectado",
+        "## Qué pasó",
+        "## Pasos para reproducir",
+        "## Resultado esperado vs. obtenido",
+    ]
+    posiciones = [prompt.index(h) for h in encabezados]
+    assert posiciones == sorted(posiciones)
+
+
+def test_rule_5_prohibits_inventing_generic_expectation():
+    assert "PROHIBIDO inventar un resultado esperado" in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rules_3_and_4_require_full_omission_no_placeholder():
+    assert "ELIMINA de la respuesta ese encabezado" in GENERADOR_DESCRIPCION_TICKET
+    assert "PROHIBIDO rellenar una sección omitida" in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rule_6_modulo_afectado_fallback_literal():
+    assert "Módulo afectado: no identificado" in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rule_12_no_fence_no_preamble_wording():
+    assert "sin preámbulo" in GENERADOR_DESCRIPCION_TICKET
+    assert "SIN envolverla en un bloque de código" in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_context_rules_13_to_18_only_in_con_contexto_prompt():
+    assert "Módulo > Submódulo" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "Módulo > Submódulo" not in GENERADOR_DESCRIPCION_TICKET
+
+
+# --- Sub-module naming via synthetic context (never touches memory/ fixtures) --
+
+CONTEXTO_SUBMODULO_SINTETICO = """## Matriz de riesgos
+Pantalla para registrar y calificar riesgos identificados por proceso.
+
+## Submódulos
+- Matriz de riesgos: registro y calificación de riesgos.
+- Planes de acción: seguimiento de acciones correctivas asociadas a un riesgo."""
+
+
+def test_synthetic_submodule_context_reaches_user_message_verbatim(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    cliente = FakeGroq()
+    transcripcion = "El analista no pudo calificar un riesgo en la matriz de riesgos."
+
+    resultado = generar_descripcion(
+        transcripcion,
+        cliente=cliente,
+        proveedor_contexto=lambda t: CONTEXTO_SUBMODULO_SINTETICO,
+    )
+
+    assert resultado == "Descripción generada de prueba"
+    kwargs = cliente.chat.completions.calls[0]
+    system_msg = kwargs["messages"][0]["content"]
+    user_msg = kwargs["messages"][1]["content"]
+
+    assert system_msg == GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "Módulo > Submódulo" in system_msg
+    assert user_msg == ENTRADA_GENERADOR_DESCRIPCION_CON_CONTEXTO.format(
+        contexto=CONTEXTO_SUBMODULO_SINTETICO, transcripcion=transcripcion
+    )
+
+
+# --- Template output shape (end-to-end through the post-processor) --------
+
+
+def test_full_template_response_starts_with_modulo_and_contains_que_paso(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = (
+        "## Módulo afectado\n"
+        "Gestión de riesgos\n\n"
+        "## Qué pasó\n"
+        "El analista intentó guardar un riesgo y la pantalla se quedó cargando.\n\n"
+        "## Pasos para reproducir\n"
+        "1. Entrar al módulo de riesgos.\n"
+        "2. Completar el formulario de un riesgo nuevo.\n"
+        "3. Presionar guardar.\n"
+    )
+    cliente = FakeGroq(respuesta=texto)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert resultado.startswith("## Módulo afectado")
+    assert "## Qué pasó" in resultado
+
+
+def test_response_without_steps_omits_pasos_heading(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó y no quedaron pasos claros.\n"
+    cliente = FakeGroq(respuesta=texto)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert "## Pasos para reproducir" not in resultado
+
+
+def test_response_without_expectation_omits_resultado_heading(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó y no se mencionó una expectativa.\n"
+    cliente = FakeGroq(respuesta=texto)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert "## Resultado esperado vs. obtenido" not in resultado
+
+
+def test_response_falls_back_to_modulo_no_identificado(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = "## Módulo afectado\nMódulo afectado: no identificado\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeGroq(respuesta=texto)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert "Módulo afectado: no identificado" in resultado
+
+
+def test_response_has_no_code_fence(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeGroq(respuesta=texto)
+
+    resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
+
+    assert "```" not in resultado
+
+
+# --- Post-processor: es_relleno_generico -----------------------------------
+
+
+# These three entries self-overlap with the scaffolding-prefix regexes
+# (design.md): stripping "se obtuvo "/"todo " from them leaves a residue
+# that is not itself a listed member, so they read as genuine in isolation.
+# Accepted per design's stated bias ("minimise false positives, accept
+# false negatives") — the regexes are not special-cased for these idioms.
+_FALSOS_NEGATIVOS_ACEPTADOS = {
+    "se obtuvo un resultado inesperado",
+    "todo funcionara bien",
+    "todo saliera bien",
+}
+
+
+@pytest.mark.parametrize(
+    "frase", sorted(FRASES_GENERICAS - _FALSOS_NEGATIVOS_ACEPTADOS)
+)
+def test_es_relleno_generico_true_for_every_blocklist_phrase(frase):
+    assert es_relleno_generico(frase) is True
+
+
+@pytest.mark.parametrize("frase", sorted(_FALSOS_NEGATIVOS_ACEPTADOS))
+def test_es_relleno_generico_accepted_false_negative_in_isolation(frase):
+    """Documents the accepted bias: these entries only registered as filler
+    when embedded in a sentence with different scaffolding, not bare."""
+    assert es_relleno_generico(frase) is False
+
+
+@pytest.mark.parametrize(
+    "cuerpo",
+    [
+        "Esperaba ver el ticket #4521 cerrado y obtuvo un error 500.",
+        "Se esperaba que el reporte `RPT-004` se generara sin intervención manual.",
+        'Esperaba que el mensaje dijera "guardado correctamente" y no dijo nada.',
+        "Esperaba ver el listado de auditorías completo.",
+    ],
+)
+def test_es_relleno_generico_false_for_genuine_bodies(cuerpo):
+    assert es_relleno_generico(cuerpo) is False
+
+
+def test_es_relleno_generico_false_for_empty_body():
+    assert es_relleno_generico("") is False
+
+
+# --- Post-processor: postprocesar_descripcion (table-driven) --------------
+
+
+def test_postprocesar_filler_body_replaced_with_notice_heading_kept():
+    texto = (
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nSe esperaba que funcionara correctamente.\n"
+    )
+
+    resultado = postprocesar_descripcion(texto)
+
+    assert ENCABEZADO_RESULTADO in resultado
+    assert AVISO_RESULTADO_NO_CONFIABLE in resultado
+    assert "funcionara correctamente" not in resultado
+
+
+def test_postprocesar_genuine_expectation_kept_byte_identical():
+    texto = (
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
+    )
+
+    assert postprocesar_descripcion(texto) == texto
+
+
+def test_postprocesar_absent_section_is_a_no_op():
+    texto = "## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n"
+
+    assert postprocesar_descripcion(texto) == texto
+
+
+def test_postprocesar_empty_body_becomes_notice():
+    texto = f"## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n\n{ENCABEZADO_RESULTADO}\n\n"
+
+    resultado = postprocesar_descripcion(texto)
+
+    assert AVISO_RESULTADO_NO_CONFIABLE in resultado
+
+
+def test_postprocesar_strips_wrapping_fence_keeps_inner_fence():
+    texto = (
+        "```markdown\n"
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nUsó `comando --flag` y falló.\n"
+        "```"
+    )
+
+    resultado = postprocesar_descripcion(texto)
+
+    assert not resultado.startswith("```")
+    assert not resultado.endswith("```")
+    assert "`comando --flag`" in resultado
+
+
+def test_postprocesar_mixed_genuine_and_filler_body_unchanged():
+    texto = (
+        "## Módulo afectado\nRiesgos\n\n"
+        "## Qué pasó\nAlgo pasó.\n\n"
+        f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte generado. Sin errores.\n"
+    )
+
+    assert postprocesar_descripcion(texto) == texto
+
+
+def test_postprocesar_non_string_content_tolerates_none():
+    assert postprocesar_descripcion(None) == ""
+
+
+def test_postprocesar_blank_string_passthrough():
+    assert postprocesar_descripcion("   ") == "   "
+
+
+def test_fake_groq_canned_response_round_trips_unchanged():
+    """The default FakeGroq canned text has no fence and no Resultado
+    heading, so postprocesar_descripcion must no-op — every Fase 1/2
+    assertion built on the literal canned string keeps holding."""
+    assert postprocesar_descripcion("Descripción generada de prueba") == (
+        "Descripción generada de prueba"
+    )
+
+
+# --- Repository rule: no inline prompt text in generar_descripcion.py -----
+
+
+def test_no_inline_prompt_text_in_generar_descripcion():
+    ruta = Path(__file__).resolve().parent.parent / "generar_descripcion.py"
+    arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+    limite = 120
+
+    ofensores = []
+    for nodo in arbol.body:
+        if isinstance(nodo, ast.Assign) and isinstance(nodo.value, ast.Constant):
+            valor = nodo.value.value
+            if isinstance(valor, str) and len(valor) > limite:
+                objetivos = [t.id for t in nodo.targets if isinstance(t, ast.Name)]
+                ofensores.append((objetivos, len(valor)))
+
+    assert ofensores == []

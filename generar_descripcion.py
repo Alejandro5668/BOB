@@ -1,6 +1,8 @@
 """Jira-ready description generation from an approved transcript via Groq.
 
-Owns the entire prompt template and the Groq client lifecycle. The client
+Owns the Groq client lifecycle and the best-effort output post-processor.
+Prompt text lives in `prompts.py` (see CLAUDE.md "Prompt repository
+convention") — this module imports it, never defines it inline. The client
 is always constructor-injected (never built at import time) so unit tests
 run today with a fake client and the missing `GROQ_API_KEY` blocker never
 breaks import or testing. Never imports Streamlit (see spec "Module
@@ -9,55 +11,128 @@ Testability").
 Fase 2 adds an optional `proveedor_contexto` seam mirroring `cliente`:
 when a module clears the retrieval threshold (see `contexto_memoria.py`),
 its `_modulo.md` content is injected as a distinct, delimited context
-block using `SYSTEM_PROMPT_CON_CONTEXTO`. When no context is returned,
-the Groq request stays byte-identical to Fase 1 (`SYSTEM_PROMPT` +
-`PLANTILLA_USUARIO`).
+block using `GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO`. When no context is
+returned, the Groq request stays byte-identical to the no-context path
+(`GENERADOR_DESCRIPCION_TICKET` + `ENTRADA_GENERADOR_DESCRIPCION`).
+
+Fase 3 adds a locked Markdown ticket template (see `prompts.py`) plus
+`postprocesar_descripcion`, a pure defense-in-depth pass over the raw
+model output that replaces a generic-filler "Resultado esperado vs.
+obtenido" body with a fixed notice. It runs OUTSIDE the try/except that
+maps Groq SDK failures to `ErrorGeneracion`, so a post-processor bug can
+never surface as a fake API error.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from typing import Callable, Optional
+
+from prompts import (
+    ENTRADA_GENERADOR_DESCRIPCION,
+    ENTRADA_GENERADOR_DESCRIPCION_CON_CONTEXTO,
+    GENERADOR_DESCRIPCION_TICKET,
+    GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO,
+)
 
 MODELO = "llama-3.3-70b-versatile"
 
 ProveedorContexto = Callable[[str], str]
 
-SYSTEM_PROMPT = """Eres un asistente que redacta descripciones de incidencias para tickets de Jira, en español.
+# --- Post-processor: heading + fixed notice ------------------------------
 
-Reglas obligatorias:
-1. Escribe en prosa libre en español. Sin secciones, títulos, viñetas ni plantillas.
-2. Usa lenguaje llano, comprensible para una persona no técnica.
-3. Usa ÚNICAMENTE la información presente en la transcripción. No inventes datos.
-4. PROHIBIDO mencionar o suponer detalles de implementación (nombres de clases, funciones, métodos, tablas, endpoints, consultas SQL) que no aparezcan literalmente en la transcripción.
-5. PROHIBIDO diagnosticar la causa técnica. Describe solo el comportamiento observado: qué hacía la persona, qué esperaba y qué ocurrió.
-6. Si un dato no está en la transcripción (versión, usuario, entorno, pasos exactos), omítelo; no lo supongas ni pongas marcadores de posición.
-7. Responde solo con la descripción, sin preámbulos ni markdown."""
+ENCABEZADO_RESULTADO = "## Resultado esperado vs. obtenido"
+AVISO_RESULTADO_NO_CONFIABLE = (
+    "Resultado esperado vs. obtenido: no se pudo determinar de forma confiable"
+)
 
-PLANTILLA_USUARIO = """Transcripción del analista:
----
-{transcripcion}
----
-Redacta la descripción."""
+# Pinned blocklist (see design.md "Blocklist"): each entry is equally true
+# of any incident in any module — zero transcript-specific information.
+# Matching is always exact-fragment, never substring (see
+# `es_relleno_generico`), so bare entries like "correctamente" are safe.
+FRASES_GENERICAS = {
+    # expectativa con verbo
+    "funcionara correctamente",
+    "funcionase correctamente",
+    "funcione correctamente",
+    "funcionara con normalidad",
+    "funcionara de manera normal",
+    "funcionara normalmente",
+    "funcionara sin errores",
+    "funcionara sin problemas",
+    "funcionara sin inconvenientes",
+    "operara con normalidad",
+    "se comportara con normalidad",
+    "se comportara correctamente",
+    "cargara correctamente",
+    "se cargara correctamente",
+    "se mostrara correctamente",
+    "se guardara correctamente",
+    "se ejecutara correctamente",
+    "se completara correctamente",
+    "se procesara correctamente",
+    "respondiera correctamente",
+    "no presentara errores",
+    "no presentara ningun error",
+    "no fallara",
+    "no diera error",
+    "todo funcionara correctamente",
+    "todo funcionara bien",
+    "todo saliera bien",
+    # sin verbo
+    "un funcionamiento normal",
+    "un comportamiento normal",
+    "el funcionamiento esperado",
+    "el comportamiento esperado",
+    "el resultado esperado",
+    "sin errores",
+    "sin problemas",
+    "sin inconvenientes",
+    "sin fallos",
+    "sin novedad",
+    "de manera normal",
+    "de forma normal",
+    "con normalidad",
+    "correctamente",
+    # lado obtenido generico
+    "no funciono correctamente",
+    "no funciono como se esperaba",
+    "no funciono",
+    "no ocurrio lo esperado",
+    "no se obtuvo el resultado esperado",
+    "el resultado no fue el esperado",
+    "el resultado fue distinto al esperado",
+    "se obtuvo un resultado inesperado",
+    "un comportamiento inesperado",
+    "ocurrio un error",
+    "se presento un error",
+    "hubo un error",
+    "hubo un fallo",
+    "presento un error",
+    "arrojo un error",
+    "fallo",
+}
 
-REGLAS_CONTEXTO = """Reglas adicionales para el bloque "Contexto de módulo":
-8. El contexto es documentación interna de referencia. Úsalo SOLO para nombrar correctamente el módulo afectado y su comportamiento documentado.
-9. La transcripción es la única fuente de los hechos del incidente. PROHIBIDO presentar contenido del contexto como algo que ocurrió, se observó o se hizo.
-10. PROHIBIDO afirmar o insinuar cualquier cosa sobre el módulo que no aparezca literalmente en el bloque de contexto.
-11. Si el contexto no concuerda con lo narrado en la transcripción, IGNÓRALO por completo y redacta únicamente desde la transcripción.
-12. PROHIBIDO enumerar funcionalidades del módulo, copiar frases del contexto o mencionar que existe un contexto."""
+# Scaffolding stripped iteratively from a fragment's start before matching
+# it against FRASES_GENERICAS (see design.md "Post-Processor Interface").
+_PATRONES_PREFIJO_RELLENO = (
+    re.compile(r"^(?:el |la )?(?:resultado )?(?:esperado|obtenido|se obtuvo)\s*[:\-]?\s*"),
+    re.compile(r"^(?:se )?(?:esperaba|espera|esperaria|deberia|debia)(?: de)?(?: que)?\s*"),
+    re.compile(
+        r"^(?:el sistema|la aplicacion|el aplicativo|el modulo|la pantalla|"
+        r"la funcionalidad|el proceso|la opcion|el reporte|el formulario|"
+        r"la pagina|la accion|todo|esto|ello)\s*"
+    ),
+    re.compile(r"^(?:que|y|pero|sin embargo|en su lugar|en cambio)\s*"),
+)
 
-SYSTEM_PROMPT_CON_CONTEXTO = SYSTEM_PROMPT + "\n\n" + REGLAS_CONTEXTO
-
-PLANTILLA_USUARIO_CON_CONTEXTO = """Contexto de módulo (documentación interna, solo referencia):
-===
-{contexto}
-===
-Transcripción del analista:
----
-{transcripcion}
----
-Redacta la descripción. Los hechos salen solo de la transcripción; el contexto solo sirve para nombrar el módulo y su comportamiento documentado."""
+_PATRON_CIFRA = re.compile(r"\d")
+_PATRON_COMILLAS = re.compile(r'"[^"]+"|«[^»]+»')
+_PATRON_MARCADOR_LISTA = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
+_PATRON_FENCE_INICIO = re.compile(r"^```[a-zA-Z]*$")
+_PATRON_FENCE_FIN = re.compile(r"^```$")
 
 
 class ErrorConfiguracion(RuntimeError):
@@ -86,6 +161,117 @@ def _crear_cliente():
     return Groq(api_key=clave)
 
 
+# --- Post-processor: pure str -> str, never raises -----------------------
+
+
+def _normalizar_fragmento(fragmento: str) -> str:
+    """NFKD accent-strip, lowercase, drop bold/backtick markers, collapse
+    whitespace, strip trailing punctuation."""
+    forma = unicodedata.normalize("NFKD", fragmento)
+    sin_diacriticos = "".join(c for c in forma if not unicodedata.combining(c))
+    minusculas = sin_diacriticos.lower()
+    sin_marcas = re.sub(r"[*_`]", "", minusculas)
+    colapsado = re.sub(r"\s+", " ", sin_marcas).strip()
+    return colapsado.rstrip(".,;:!?")
+
+
+def _quitar_relleno_estructural(fragmento: str) -> str:
+    """Strip scaffolding prefixes (result marker, expectation verb, generic
+    subject, connector) iteratively from the fragment start."""
+    cambiado = True
+    while cambiado:
+        cambiado = False
+        for patron in _PATRONES_PREFIJO_RELLENO:
+            nuevo = patron.sub("", fragmento)
+            if nuevo != fragmento:
+                fragmento = nuevo
+                cambiado = True
+    return fragmento
+
+
+def _fragmentos(cuerpo: str) -> list[str]:
+    """Split on newlines, then list markers, then `.`/`;` — drop empties."""
+    piezas: list[str] = []
+    for linea in cuerpo.splitlines():
+        sin_marcador = _PATRON_MARCADOR_LISTA.sub("", linea)
+        for parte in re.split(r"[.;]+", sin_marcador):
+            parte = parte.strip()
+            if parte:
+                piezas.append(parte)
+    return piezas
+
+
+def es_relleno_generico(cuerpo: str) -> bool:
+    """True only when every fragment of `cuerpo` normalizes to an exact
+    member of FRASES_GENERICAS after scaffolding is stripped. A digit, a
+    backtick, or a quoted run anywhere makes the body genuine (False) —
+    specificity always wins. Pure, total, exported for tests."""
+    if _PATRON_CIFRA.search(cuerpo) or "`" in cuerpo or _PATRON_COMILLAS.search(cuerpo):
+        return False
+
+    fragmentos = _fragmentos(cuerpo)
+    if not fragmentos:
+        return False
+
+    for fragmento in fragmentos:
+        residuo = _quitar_relleno_estructural(_normalizar_fragmento(fragmento))
+        if residuo and residuo not in FRASES_GENERICAS:
+            return False
+    return True
+
+
+def postprocesar_descripcion(texto: str) -> str:
+    """Best-effort defense-in-depth over the raw Groq response: strips a
+    whole-output code fence and replaces a generic-filler
+    `## Resultado esperado vs. obtenido` body with a fixed notice.
+
+    Pure, total, never raises. Runs OUTSIDE the try/except that maps Groq
+    SDK failures to `ErrorGeneracion` — a bug here must never surface as a
+    fake API error. This is defense-in-depth only: the prompt template is
+    the primary control against invented expectations.
+    """
+    if not isinstance(texto, str) or not texto.strip():
+        return texto or ""
+
+    resultado = texto
+    lineas = resultado.split("\n")
+
+    if (
+        len(lineas) >= 2
+        and _PATRON_FENCE_INICIO.match(lineas[0])
+        and _PATRON_FENCE_FIN.match(lineas[-1])
+    ):
+        lineas = lineas[1:-1]
+        resultado = "\n".join(lineas)
+
+    indice_encabezado = None
+    for i, linea in enumerate(lineas):
+        if linea.strip().rstrip(":") == ENCABEZADO_RESULTADO:
+            indice_encabezado = i
+            break
+
+    if indice_encabezado is None:
+        return resultado
+
+    fin_cuerpo = len(lineas)
+    for j in range(indice_encabezado + 1, len(lineas)):
+        if lineas[j].startswith("## "):
+            fin_cuerpo = j
+            break
+
+    cuerpo = "\n".join(lineas[indice_encabezado + 1 : fin_cuerpo]).strip()
+
+    if cuerpo and not es_relleno_generico(cuerpo):
+        return resultado
+
+    reemplazo = [AVISO_RESULTADO_NO_CONFIABLE]
+    if fin_cuerpo < len(lineas):
+        reemplazo.append("")
+
+    nuevas_lineas = lineas[: indice_encabezado + 1] + reemplazo + lineas[fin_cuerpo:]
+    return "\n".join(nuevas_lineas)
+
+
 def generar_descripcion(
     transcripcion: str,
     *,
@@ -103,8 +289,12 @@ def generar_descripcion(
     lazily to `contexto_memoria.buscar_contexto` (a total function that
     never raises and returns `""` on no-match/missing/unreadable memory).
     When it returns a non-empty string, the Groq request uses
-    `SYSTEM_PROMPT_CON_CONTEXTO` and the context-block user template.
-    Otherwise the request stays byte-identical to Fase 1.
+    `GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO` and the context-block user
+    template. Otherwise the request stays byte-identical to the no-context
+    path.
+
+    The raw Groq response is passed through `postprocesar_descripcion`
+    before it is returned (outside the try/except below).
     """
     if cliente is None:
         cliente = _crear_cliente()
@@ -115,13 +305,13 @@ def generar_descripcion(
     contexto = proveedor_contexto(transcripcion)
 
     if contexto:
-        system_prompt = SYSTEM_PROMPT_CON_CONTEXTO
-        mensaje_usuario = PLANTILLA_USUARIO_CON_CONTEXTO.format(
+        system_prompt = GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+        mensaje_usuario = ENTRADA_GENERADOR_DESCRIPCION_CON_CONTEXTO.format(
             contexto=contexto, transcripcion=transcripcion
         )
     else:
-        system_prompt = SYSTEM_PROMPT
-        mensaje_usuario = PLANTILLA_USUARIO.format(transcripcion=transcripcion)
+        system_prompt = GENERADOR_DESCRIPCION_TICKET
+        mensaje_usuario = ENTRADA_GENERADOR_DESCRIPCION.format(transcripcion=transcripcion)
 
     try:
         respuesta = cliente.chat.completions.create(
@@ -139,4 +329,4 @@ def generar_descripcion(
             "la API de Groq)."
         ) from exc
 
-    return respuesta.choices[0].message.content
+    return postprocesar_descripcion(respuesta.choices[0].message.content)

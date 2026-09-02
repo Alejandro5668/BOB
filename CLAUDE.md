@@ -86,6 +86,25 @@ conflict on merge even when the source code doesn't.
 
 ---
 
+## Prompt repository convention
+
+Every prompt sent to an LLM (Groq, or any future provider) lives as a named
+constant in `prompts.py` at repo root — never inline inside the module that
+calls the API. Each prompt:
+
+- Gets a distinctive, role-descriptive name (e.g. `GENERADOR_DESCRIPCION_TICKET`)
+  stating what it's for and, implicitly, which part of the project uses it.
+- Has a short docstring/comment stating its role and use case — not a long
+  design essay, just enough for the next person (or AI) to know when to use it.
+- Stays short and consistent — no padding, no speculative instructions for
+  scenarios that don't exist yet.
+
+`prompts.py` starts as a single file. Only split it into a `prompts/` package
+once a second, genuinely unrelated AI-calling feature needs its own prompts —
+don't pre-build that structure for one feature's prompts.
+
+---
+
 ## Concurrent agent sessions in the same local clone
 
 Two collaborators' agent sessions can end up running against the exact
