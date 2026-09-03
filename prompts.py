@@ -130,22 +130,30 @@ Texto de "resultado esperado" a evaluar:
 ¿Está fundamentado explícitamente en la transcripción?"""
 """Mensaje de usuario para VERIFICADOR_RESULTADO_ESPERADO."""
 
-VERIFICADOR_MODULO_AFECTADO = """Evaluás si el nombre de un módulo, pantalla o funcionalidad citado en una respuesta es una cita literal (tolerando mayúsculas/minúsculas y tildes) de una fuente, o un nombre inventado/parafraseado que no aparece tal cual en esa fuente.
+VERIFICADOR_MODULO_AFECTADO = """Evaluás si el nombre de un módulo, pantalla o funcionalidad citado en una respuesta tiene base real en una fuente, o si es un nombre inventado sin ningún respaldo en ella.
+
+El nombre puede tener el formato "Módulo > Submódulo": el módulo suele ser una cita textual, pero el submódulo puede ser una descripción derivada del contenido de la fuente (no hace falta que aparezca palabra por palabra) — evaluá cada parte por separado con ese criterio antes de decidir. Un nombre está fundamentado si cada una de sus partes tiene una base identificable en la fuente, aunque esté reformulada; NO está fundamentado si alguna parte no tiene ninguna base real, aunque suene plausible.
 
 Respondé ÚNICAMENTE un JSON con este formato exacto, sin texto adicional:
-{"citado_literalmente": true}
+{"fundamentado": true}
 o
-{"citado_literalmente": false}"""
+{"fundamentado": false}"""
 """Prompt de sistema para el chequeo anti-invención del nombre citado en
-'## Módulo afectado' — mismo patrón que VERIFICADOR_RESULTADO_ESPERADO,
-pero verifica el nombre en vez de la expectativa. Solo se invoca cuando
+'## Módulo afectado' — mismo patrón que VERIFICADOR_RESULTADO_ESPERADO
+(pregunta por fundamentación, no por cita literal). Solo se invoca cuando
 hubo contexto de módulo recuperado (ver `generar_descripcion.postprocesar_descripcion`):
 ese es exactamente el escenario donde el modelo puede reemplazar un nombre
 real (dicho por el analista o presente en la documentación) por uno
-parafraseado que le suene más natural — el caso real que motivó este
-chequeo: "listado único de documentos" (dicho por el analista y presente
-en la documentación) reemplazado por "edición masiva de documentos"
-(inventado)."""
+inventado sin ninguna base.
+
+Deliberadamente NO pide "cita literal": una primera versión de este prompt
+sí lo hacía, y eso rechazaba nombres "Módulo > Submódulo" legítimos donde
+el submódulo es una descripción derivada del contenido documentado, no
+una copia textual (caso real: "Gestión documental > Registro de
+documento" fue rechazado por no ser cita literal, pese a estar
+perfectamente fundamentado en `gst_documental/reg_insertar.php`). El
+criterio correcto es el mismo que ya usa VERIFICADOR_RESULTADO_ESPERADO:
+¿tiene base real en la fuente?, no ¿aparece tal cual?"""
 
 ENTRADA_VERIFICADOR_MODULO_AFECTADO = """Fuente (transcripción del analista + documentación de contexto):
 ---
@@ -155,7 +163,7 @@ Nombre citado a evaluar:
 ---
 {modulo}
 ---
-¿Es una cita literal (aparece tal cual, salvo mayúsculas/tildes) de la fuente?"""
+¿Está fundamentado en la fuente (cada parte, aunque esté reformulada), o alguna parte es inventada sin base real?"""
 """Mensaje de usuario para VERIFICADOR_MODULO_AFECTADO."""
 
 PREFILL_RESPONDEDOR_CONSULTA = "[TIPO:"

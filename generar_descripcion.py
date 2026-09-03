@@ -165,7 +165,7 @@ def _verificar_modulo_afectado(fuente: str, modulo: str, cliente) -> bool:
             mensaje_usuario=ENTRADA_VERIFICADOR_MODULO_AFECTADO.format(fuente=fuente, modulo=modulo),
             max_tokens=150,
         )
-        return bool(datos.get("citado_literalmente", True))
+        return bool(datos.get("fundamentado", True))
     except Exception as exc:
         logger.warning(
             "Verificación de 'Módulo afectado' falló, se conserva el texto: %s: %s",

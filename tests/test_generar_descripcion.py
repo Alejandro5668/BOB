@@ -46,12 +46,12 @@ class FakeMessages:
         self,
         respuesta="Descripción generada de prueba",
         fundamentado=True,
-        citado_literalmente=True,
+        modulo_fundamentado=True,
     ):
         self.calls = []
         self._respuesta = respuesta
         self._fundamentado = fundamentado
-        self._citado_literalmente = citado_literalmente
+        self._modulo_fundamentado = modulo_fundamentado
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -59,8 +59,8 @@ class FakeMessages:
             valor = "true" if self._fundamentado else "false"
             return FakeMensaje(f'"fundamentado": {valor}}}')
         if kwargs.get("system") == VERIFICADOR_MODULO_AFECTADO:
-            valor = "true" if self._citado_literalmente else "false"
-            return FakeMensaje(f'"citado_literalmente": {valor}}}')
+            valor = "true" if self._modulo_fundamentado else "false"
+            return FakeMensaje(f'"fundamentado": {valor}}}')
         return FakeMensaje(self._respuesta)
 
 
@@ -69,9 +69,9 @@ class FakeAnthropic:
         self,
         respuesta="Descripción generada de prueba",
         fundamentado=True,
-        citado_literalmente=True,
+        modulo_fundamentado=True,
     ):
-        self.messages = FakeMessages(respuesta, fundamentado, citado_literalmente)
+        self.messages = FakeMessages(respuesta, fundamentado, modulo_fundamentado)
 
 
 @pytest.fixture(autouse=True)
@@ -533,7 +533,7 @@ def test_postprocesar_modulo_verifier_skipped_when_no_contexto():
 
 def test_postprocesar_modulo_verifier_says_literal_keeps_text():
     texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
-    cliente = FakeAnthropic(citado_literalmente=True)
+    cliente = FakeAnthropic(modulo_fundamentado=True)
 
     resultado = postprocesar_descripcion(
         texto, "transcripción", cliente, contexto="doc de Listado único de documentos"
@@ -544,9 +544,32 @@ def test_postprocesar_modulo_verifier_says_literal_keeps_text():
     assert cliente.messages.calls[0]["system"] == VERIFICADOR_MODULO_AFECTADO
 
 
+def test_postprocesar_modulo_verifier_accepts_grounded_submodulo_not_verbatim():
+    """Regression: a real bug. 'Gestión documental > Registro de documento'
+    is legitimately grounded — 'Gestión documental' is verbatim from the
+    transcript, 'Registro de documento' is a fair derivation from the
+    retrieved doc's actual subject (gst_documental/reg_insertar.php) — but
+    it's NOT a verbatim substring of either source. An earlier version of
+    this verifier asked "is this a literal quote?" and wrongly rejected it,
+    replacing a correct answer with 'no identificado'. The verifier must
+    ask "is this grounded?", not "is this literal?"."""
+    texto = "## Módulo afectado\nGestión documental > Registro de documento\n\n## Qué pasó\nAlgo pasó.\n"
+    cliente = FakeAnthropic(modulo_fundamentado=True)
+
+    resultado = postprocesar_descripcion(
+        texto,
+        "En el módulo de gestión documental un cliente reporta un problema.",
+        cliente,
+        contexto="Documentación de gst_documental/reg_insertar.php: formulario de registro de un documento.",
+    )
+
+    assert resultado == texto
+    assert "no identificado" not in resultado
+
+
 def test_postprocesar_modulo_verifier_says_invented_replaces_with_no_identificado():
     texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Qué pasó\nAlgo pasó.\n"
-    cliente = FakeAnthropic(citado_literalmente=False)
+    cliente = FakeAnthropic(modulo_fundamentado=False)
 
     resultado = postprocesar_descripcion(
         texto,
@@ -589,7 +612,7 @@ def test_postprocesar_modulo_verifier_exception_defaults_to_keeping_text():
 def test_generar_descripcion_calls_modulo_verifier_when_context_used(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
-    cliente = FakeAnthropic(respuesta=texto, citado_literalmente=True)
+    cliente = FakeAnthropic(respuesta=texto, modulo_fundamentado=True)
 
     resultado = generar_descripcion(
         "transcripción de prueba",
