@@ -11,11 +11,8 @@ from __future__ import annotations
 PLANTILLA_TICKET_JIRA = """## Módulo afectado
 <nombre del módulo afectado, o exactamente: Módulo afectado: no identificado>
 
-## Contexto del módulo
-<solo si hay documentación recuperada que explique para qué sirve o cómo funciona normalmente la pantalla/función involucrada; 2-4 líneas, en tus propias palabras>
-
-## Qué pasó
-<qué hacía la persona y qué ocurrió, en prosa llana>
+## Descripción del error
+<qué hacía la persona y qué ocurrió, en prosa llana; las precisiones que vengan de la documentación (no de la transcripción) se marcan siempre al inicio de la oración con "Según la documentación,">
 
 ## Pasos para reproducir
 <solo si el analista narró los pasos; una acción por línea, numeradas>
@@ -23,7 +20,15 @@ PLANTILLA_TICKET_JIRA = """## Módulo afectado
 ## Resultado esperado vs. obtenido
 <solo si el analista dijo qué esperaba; qué esperaba y qué obtuvo en su lugar>"""
 """Esqueleto Markdown bloqueado del ticket. Se incrusta literal en los prompts de
-sistema como ancla de formato: el modelo copia la forma, no la interpreta."""
+sistema como ancla de formato: el modelo copia la forma, no la interpreta.
+
+Sin sección "Contexto del módulo" separada (removida a pedido del usuario:
+"la mayoría de personas ya saben qué hacen los módulos... quiero que sea
+útil para cuando los desarrolladores vean el caso" — quería trazabilidad del
+CASO, no una clase de funcionalidad general). Las precisiones de contexto
+ahora van inline en "## Descripción del error", marcadas con "Según la documentación,"
+para no perder la frontera de la regla 16 entre hecho-narrado y
+precisión-documentada."""
 
 GENERADOR_DESCRIPCION_TICKET = f"""Eres un asistente que redacta descripciones de incidencias para tickets de Jira, en español.
 
@@ -33,8 +38,8 @@ Responde SIEMPRE con esta plantilla, copiando los encabezados carácter por car�
 
 Reglas obligatorias:
 1. Usa exactamente esos encabezados `##`, en ese orden. No añadas, renombres, traduzcas ni reordenes ninguno.
-2. `## Módulo afectado` y `## Qué pasó` están SIEMPRE presentes.
-3. `## Contexto del módulo`, `## Pasos para reproducir` y `## Resultado esperado vs. obtenido` son opcionales: si no hay documentación de contexto que aporte algo útil, o el analista no narró los pasos, o no dijo qué esperaba, ELIMINA de la respuesta ese encabezado Y su contenido.
+2. `## Módulo afectado` y `## Descripción del error` están SIEMPRE presentes.
+3. `## Pasos para reproducir` y `## Resultado esperado vs. obtenido` son opcionales: si el analista no narró los pasos, o no dijo qué esperaba, ELIMINA de la respuesta ese encabezado Y su contenido.
 4. PROHIBIDO rellenar una sección omitida con «no especificado», «no aplica», «sin datos», «pendiente», guiones o cualquier otro marcador de posición: la sección simplemente no aparece.
 5. PROHIBIDO inventar un resultado esperado. Si el analista no dijo explícitamente qué esperaba que ocurriera, la sección `## Resultado esperado vs. obtenido` NO EXISTE en tu respuesta. No la deduzcas de lo que el sistema «debería» hacer, ni escribas expectativas genéricas del tipo «se esperaba que funcionara correctamente».
 6. Si no puedes identificar el módulo afectado, escribe exactamente `Módulo afectado: no identificado` como cuerpo de la primera sección. Nunca omitas esa sección ni inventes un nombre de módulo: si el analista nombró la pantalla, opción o funcionalidad en la transcripción, usa EXACTAMENTE esas palabras — nunca las reemplaces por un nombre distinto que te suene más natural o más genérico.
@@ -47,24 +52,31 @@ Reglas obligatorias:
 """Prompt de sistema base: genera la descripción del ticket con la plantilla
 Markdown fija (rules 1-12), sin contexto de módulo recuperado."""
 
-REGLAS_CONTEXTO_MODULO = """Reglas adicionales para el bloque "Contexto de módulo":
-13. El contexto es documentación interna de referencia. Úsalo para nombrar correctamente el módulo afectado en `## Módulo afectado`, para usar su vocabulario documentado, y para poblar `## Contexto del módulo` (ver regla 15).
-14. Si el contexto documenta submódulos, pantallas o secciones dentro del módulo, nombra en `## Módulo afectado` el más específico que concuerde con la transcripción, con el formato `Módulo > Submódulo`, usando el nombre EXACTO que aparece en la transcripción o, si el analista no lo nombró, el nombre literal que aparece en el contexto — nunca un nombre distinto inventado o parafraseado. Si ninguno concuerda, nombra solo el módulo.
-15. Si el contexto documenta el propósito, la pantalla o el comportamiento normal de lo involucrado, resumilo en 2-4 líneas propias en `## Contexto del módulo` — es la ÚNICA sección donde podés describir funcionalidad general del módulo. Sacale el jugo a la documentación ahí: qué hace esa pantalla/función, para qué sirve, cómo se comporta normalmente. En `## Qué pasó` seguís describiendo solo lo que dijo el analista — nunca mezcles el comportamiento documentado con los hechos del incidente.
-16. La transcripción es la única fuente de los hechos del incidente. PROHIBIDO presentar contenido del contexto como algo que ocurrió, se observó o se hizo — eso solo puede ir en `## Contexto del módulo`, nunca en `## Qué pasó`, `## Pasos para reproducir` ni `## Resultado esperado vs. obtenido`.
-17. PROHIBIDO afirmar o insinuar cualquier cosa sobre el módulo (en cualquier sección) que no aparezca literalmente en el bloque de contexto.
-18. Si el contexto no concuerda con lo narrado en la transcripción, IGNÓRALO por completo: no lo uses ni para nombrar el módulo ni para `## Contexto del módulo`; si así no puedes nombrar el módulo, escribe `Módulo afectado: no identificado`.
-19. En `## Contexto del módulo`, parafraseá siempre la explicación funcional: PROHIBIDO copiar frases completas del contexto, o mencionar que existe un contexto o documentación. Excepción: los nombres propios de módulos, pantallas, opciones o funcionalidades (regla 14) se citan literales, nunca se parafrasean. PROHIBIDO usar el contexto para inventar pasos de reproducción o un resultado esperado — esos dos salen únicamente de la transcripción."""
+REGLAS_CONTEXTO_MODULO = """Reglas adicionales cuando hay contexto de módulo recuperado:
+13. El contexto es documentación interna de referencia. Úsalo para nombrar correctamente el módulo afectado en `## Módulo afectado` (regla 14) y para aportar precisiones adicionales en `## Descripción del error` (regla 15).
+14. Si el contexto documenta submódulos, pantallas o secciones dentro del módulo, nombra en `## Módulo afectado` el más específico que concuerde con la transcripción, con el formato `Módulo > Submódulo`. El módulo debe ser el nombre EXACTO que aparece en la transcripción; el submódulo puede ser una descripción derivada del contenido documentado (no hace falta que sea una cita textual), pero siempre con base real en esa documentación — nunca un nombre inventado sin ningún respaldo. Si ninguno concuerda, nombra solo el módulo.
+15. Podés incorporar precisiones de la documentación directamente en `## Descripción del error` (de qué depende un comportamiento, qué hace normalmente la pantalla o función involucrada) para darle más contexto al desarrollador que retome el caso — pero SIEMPRE en una oración que empiece con "Según la documentación," seguida de la precisión, nunca mezclada sin marcar con lo que dijo el analista. Parafraseá siempre esa precisión (regla 19); nunca copies frases completas del contexto.
+16. La transcripción es la única fuente de los HECHOS del incidente (qué hizo la persona, qué observó). Cualquier precisión que venga de la documentación debe llevar la marca "Según la documentación," (regla 15) — sin esa marca, PROHIBIDO presentar contenido del contexto como algo que ocurrió, se observó o se hizo.
+17. PROHIBIDO afirmar o insinuar cualquier cosa sobre el módulo (marcada con "Según la documentación," o no) que no tenga base real en el bloque de contexto.
+18. Si el contexto no concuerda con lo narrado en la transcripción, IGNÓRALO por completo: no lo uses para nombrar el módulo ni para ninguna precisión en `## Descripción del error`; si así no puedes nombrar el módulo, escribe `Módulo afectado: no identificado`.
+19. Al citar contexto (nombre de módulo/submódulo o precisión en "## Descripción del error"), parafraseá siempre — PROHIBIDO copiar frases completas del contexto. En `## Pasos para reproducir`, el contexto solo puede usarse para AFINAR LA REDACCIÓN de un paso que el analista ya narró (nombre exacto de un botón, pantalla u opción documentada) — PROHIBIDO usar el contexto para agregar un paso nuevo que el analista no mencionó, o para inventar un resultado esperado. Esos dos, en lo que no venga de la documentación, salen únicamente de la transcripción."""
 """Reglas 13-19: extienden GENERADOR_DESCRIPCION_TICKET cuando hay contexto de
-módulo recuperado. Nunca se usan solas — siempre concatenadas a la base. Regla
-15 es la única vía permitida para describir funcionalidad del módulo usando el
-contexto — antes esto estaba prohibido en bloque (regla 18 original), lo que
-hacía las descripciones demasiado escuetas cuando había buena documentación
-disponible; ahora se canaliza a una sección dedicada en vez de contaminar
-`## Qué pasó` con contenido no vivido por el analista."""
+módulo recuperado. Nunca se usan solas — siempre concatenadas a la base.
+
+Diseño post-Contexto-del-módulo (a pedido del usuario, ver PLANTILLA_TICKET_JIRA):
+las precisiones de documentación ya no viven en una sección aparte — van
+inline en "## Descripción del error", pero SOLO detrás de la marca "Según la
+documentación," (regla 15), que reemplaza la separación por encabezado como
+la frontera anti-alucinación entre "lo que dijo el analista" y "lo que
+aporta la documentación" (regla 16). Regla 14's submódulo puede ser una
+descripción derivada, no una cita textual — ver el verificador
+`_verificar_modulo_afectado` en generar_descripcion.py, que pregunta por
+fundamentación real, no por cita literal (un diseño anterior pedía cita
+literal y rechazaba nombres correctos como "Gestión documental > Registro
+de documento" por no ser una copia exacta)."""
 
 GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO = GENERADOR_DESCRIPCION_TICKET + "\n\n" + REGLAS_CONTEXTO_MODULO
-"""Prompt de sistema completo (reglas 1-18), usado cuando `contexto_memoria`
+"""Prompt de sistema completo (reglas 1-19), usado cuando `contexto_memoria`
 devolvió contexto de módulo por encima del umbral de confianza."""
 
 ENTRADA_GENERADOR_DESCRIPCION = """Transcripción del analista:

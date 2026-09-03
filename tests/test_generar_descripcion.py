@@ -247,8 +247,7 @@ def test_system_prompts_embed_plantilla_ticket_jira_verbatim(prompt):
 def test_template_headings_appear_in_fixed_order(prompt):
     encabezados = [
         "## Módulo afectado",
-        "## Contexto del módulo",
-        "## Qué pasó",
+        "## Descripción del error",
         "## Pasos para reproducir",
         "## Resultado esperado vs. obtenido",
     ]
@@ -283,21 +282,23 @@ def test_context_rules_13_to_19_only_in_con_contexto_prompt():
     assert "Módulo > Submódulo" not in GENERADOR_DESCRIPCION_TICKET
 
 
-def test_rule_15_allows_module_functionality_only_in_contexto_del_modulo_section():
-    """Regression: rule 18 originally banned ANY functional enumeration from
-    context, making descriptions too terse when good documentation existed
-    (real example: cfg_configuracion/lxm_modificar.md — a labels/lists
-    management screen — was correctly retrieved but its content was
-    discarded entirely). Rule 15 now channels that into one dedicated
-    section instead."""
-    assert "## Contexto del módulo" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
-    assert "ÚNICA sección donde podés describir funcionalidad" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
-    assert "nunca mezcles el comportamiento documentado con los hechos del incidente" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+def test_rule_15_allows_context_precision_inline_marked_in_descripcion_error():
+    """Regression: the original design confined all context-derived
+    functionality to a dedicated '## Contexto del módulo' section. Removed
+    at the user's request (developers don't need a generic functionality
+    primer, they need case traceability) — context precision now goes
+    inline in '## Descripción del error', but ONLY behind an explicit
+    "Según la documentación," marker, which replaces the heading boundary
+    as the anti-hallucination line between analyst-stated facts and
+    documentation-derived precision."""
+    assert "## Contexto del módulo" not in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert 'empiece con "Según la documentación,"' in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "## Descripción del error" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
 
 
-def test_rule_16_context_facts_confined_to_contexto_del_modulo_section():
+def test_rule_16_unmarked_context_content_still_banned_from_facts():
     assert (
-        "eso solo puede ir en `## Contexto del módulo`, nunca en `## Qué pasó`"
+        'sin esa marca, PROHIBIDO presentar contenido del contexto como algo que ocurrió'
         in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
     )
 
@@ -305,7 +306,14 @@ def test_rule_16_context_facts_confined_to_contexto_del_modulo_section():
 def test_rule_19_still_bans_literal_copying_and_context_leaking_into_steps():
     assert "parafraseá siempre" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
     assert (
-        "usar el contexto para inventar pasos de reproducción o un resultado esperado"
+        "agregar un paso nuevo que el analista no mencionó, o para inventar un resultado esperado"
+        in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    )
+
+
+def test_rule_19_allows_context_to_refine_step_wording_only():
+    assert (
+        "el contexto solo puede usarse para AFINAR LA REDACCIÓN de un paso que el analista ya narró"
         in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
     )
 
@@ -352,7 +360,7 @@ def test_full_template_response_starts_with_modulo_and_contains_que_paso(monkeyp
     texto = (
         "## Módulo afectado\n"
         "Gestión de riesgos\n\n"
-        "## Qué pasó\n"
+        "## Descripción del error\n"
         "El analista intentó guardar un riesgo y la pantalla se quedó cargando.\n\n"
         "## Pasos para reproducir\n"
         "1. Entrar al módulo de riesgos.\n"
@@ -364,12 +372,12 @@ def test_full_template_response_starts_with_modulo_and_contains_que_paso(monkeyp
     resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
 
     assert resultado.startswith("## Módulo afectado")
-    assert "## Qué pasó" in resultado
+    assert "## Descripción del error" in resultado
 
 
 def test_response_without_steps_omits_pasos_heading(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó y no quedaron pasos claros.\n"
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Descripción del error\nAlgo pasó y no quedaron pasos claros.\n"
     cliente = FakeAnthropic(respuesta=texto)
 
     resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
@@ -379,7 +387,7 @@ def test_response_without_steps_omits_pasos_heading(monkeypatch):
 
 def test_response_without_expectation_omits_resultado_heading(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó y no se mencionó una expectativa.\n"
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Descripción del error\nAlgo pasó y no se mencionó una expectativa.\n"
     cliente = FakeAnthropic(respuesta=texto)
 
     resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
@@ -389,7 +397,7 @@ def test_response_without_expectation_omits_resultado_heading(monkeypatch):
 
 def test_response_falls_back_to_modulo_no_identificado(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nMódulo afectado: no identificado\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nMódulo afectado: no identificado\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(respuesta=texto)
 
     resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
@@ -399,7 +407,7 @@ def test_response_falls_back_to_modulo_no_identificado(monkeypatch):
 
 def test_response_has_no_code_fence(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nGestión de riesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nGestión de riesgos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(respuesta=texto)
 
     resultado = generar_descripcion("transcripción de prueba", cliente=cliente)
@@ -411,7 +419,7 @@ def test_generar_descripcion_calls_verifier_when_resultado_esperado_present(monk
     """End-to-end wiring: the SAME cliente is reused for the verifier call."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     texto = (
-        f"## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n\n"
+        f"## Módulo afectado\nRiesgos\n\n## Descripción del error\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
     )
     cliente = FakeAnthropic(respuesta=texto, fundamentado=True)
@@ -427,7 +435,7 @@ def test_generar_descripcion_calls_verifier_when_resultado_esperado_present(monk
 
 def test_generar_descripcion_no_verifier_call_when_no_resultado_section(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nRiesgos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(respuesta=texto)
 
     generar_descripcion("transcripción de prueba", cliente=cliente)
@@ -441,7 +449,7 @@ def test_generar_descripcion_no_verifier_call_when_no_resultado_section(monkeypa
 def test_postprocesar_verifier_says_grounded_keeps_text():
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nAlgo pasó.\n\n"
+        "## Descripción del error\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nEsperaba ver el ticket #4521 cerrado y obtuvo un error 500.\n"
     )
     cliente = FakeAnthropic(fundamentado=True)
@@ -452,7 +460,7 @@ def test_postprocesar_verifier_says_grounded_keeps_text():
 def test_postprocesar_verifier_says_not_grounded_replaces_with_notice():
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nAlgo pasó.\n\n"
+        "## Descripción del error\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nSe esperaba que funcionara correctamente.\n"
     )
     cliente = FakeAnthropic(fundamentado=False)
@@ -468,7 +476,7 @@ def test_postprocesar_verifier_exception_defaults_to_keeping_text():
     """A broken verifier must never erase real analyst-provided content."""
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nAlgo pasó.\n\n"
+        "## Descripción del error\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte exportado en PDF.\n"
     )
 
@@ -488,7 +496,7 @@ def test_postprocesar_verifier_exception_defaults_to_keeping_text():
 def test_postprocesar_verifier_malformed_json_defaults_to_keeping_text():
     texto = (
         "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nAlgo pasó.\n\n"
+        "## Descripción del error\nAlgo pasó.\n\n"
         f"{ENCABEZADO_RESULTADO}\nEsperaba ver el reporte exportado en PDF.\n"
     )
 
@@ -506,7 +514,7 @@ def test_postprocesar_verifier_malformed_json_defaults_to_keeping_text():
 
 
 def test_postprocesar_absent_section_is_a_no_op_and_skips_verifier():
-    texto = "## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nRiesgos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic()
 
     assert postprocesar_descripcion(texto, "transcripción", cliente) == texto
@@ -522,7 +530,7 @@ def test_postprocesar_modulo_verifier_skipped_when_no_contexto():
     Without contexto (rule 6's only source is the transcript itself), the
     verifier must not run at all — zero extra calls, same as before this
     guardrail existed."""
-    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic()
 
     resultado = postprocesar_descripcion(texto, "transcripción", cliente, contexto="")
@@ -532,7 +540,7 @@ def test_postprocesar_modulo_verifier_skipped_when_no_contexto():
 
 
 def test_postprocesar_modulo_verifier_says_literal_keeps_text():
-    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(modulo_fundamentado=True)
 
     resultado = postprocesar_descripcion(
@@ -553,7 +561,7 @@ def test_postprocesar_modulo_verifier_accepts_grounded_submodulo_not_verbatim():
     this verifier asked "is this a literal quote?" and wrongly rejected it,
     replacing a correct answer with 'no identificado'. The verifier must
     ask "is this grounded?", not "is this literal?"."""
-    texto = "## Módulo afectado\nGestión documental > Registro de documento\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nGestión documental > Registro de documento\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(modulo_fundamentado=True)
 
     resultado = postprocesar_descripcion(
@@ -568,7 +576,7 @@ def test_postprocesar_modulo_verifier_accepts_grounded_submodulo_not_verbatim():
 
 
 def test_postprocesar_modulo_verifier_says_invented_replaces_with_no_identificado():
-    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nEdición masiva de documentos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(modulo_fundamentado=False)
 
     resultado = postprocesar_descripcion(
@@ -580,11 +588,11 @@ def test_postprocesar_modulo_verifier_says_invented_replaces_with_no_identificad
 
     assert MODULO_NO_IDENTIFICADO in resultado
     assert "Edición masiva de documentos" not in resultado
-    assert "## Qué pasó" in resultado  # rest of the ticket untouched
+    assert "## Descripción del error" in resultado  # rest of the ticket untouched
 
 
 def test_postprocesar_modulo_verifier_skipped_when_already_no_identificado():
-    texto = f"## Módulo afectado\n{MODULO_NO_IDENTIFICADO}\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = f"## Módulo afectado\n{MODULO_NO_IDENTIFICADO}\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic()
 
     resultado = postprocesar_descripcion(texto, "transcripción", cliente, contexto="algún contexto")
@@ -594,7 +602,7 @@ def test_postprocesar_modulo_verifier_skipped_when_already_no_identificado():
 
 
 def test_postprocesar_modulo_verifier_exception_defaults_to_keeping_text():
-    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Descripción del error\nAlgo pasó.\n"
 
     class MessagesRotas:
         def create(self, **kwargs):
@@ -611,7 +619,7 @@ def test_postprocesar_modulo_verifier_exception_defaults_to_keeping_text():
 
 def test_generar_descripcion_calls_modulo_verifier_when_context_used(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    texto = "## Módulo afectado\nListado único de documentos\n\n## Qué pasó\nAlgo pasó.\n"
+    texto = "## Módulo afectado\nListado único de documentos\n\n## Descripción del error\nAlgo pasó.\n"
     cliente = FakeAnthropic(respuesta=texto, modulo_fundamentado=True)
 
     resultado = generar_descripcion(
@@ -627,7 +635,7 @@ def test_generar_descripcion_calls_modulo_verifier_when_context_used(monkeypatch
 
 
 def test_postprocesar_empty_body_becomes_notice_without_calling_verifier():
-    texto = f"## Módulo afectado\nRiesgos\n\n## Qué pasó\nAlgo pasó.\n\n{ENCABEZADO_RESULTADO}\n\n"
+    texto = f"## Módulo afectado\nRiesgos\n\n## Descripción del error\nAlgo pasó.\n\n{ENCABEZADO_RESULTADO}\n\n"
     cliente = FakeAnthropic()
 
     resultado = postprocesar_descripcion(texto, "transcripción", cliente)
@@ -640,7 +648,7 @@ def test_postprocesar_strips_wrapping_fence_keeps_inner_fence():
     texto = (
         "```markdown\n"
         "## Módulo afectado\nRiesgos\n\n"
-        "## Qué pasó\nUsó `comando --flag` y falló.\n"
+        "## Descripción del error\nUsó `comando --flag` y falló.\n"
         "```"
     )
     cliente = FakeAnthropic()

@@ -100,13 +100,10 @@ libre:
 
 ```markdown
 ## Módulo afectado
-<módulo detectado, o "Módulo afectado: no identificado">
+<módulo detectado, formato "Módulo > Submódulo" si aplica, o "Módulo afectado: no identificado">
 
-## Contexto del módulo
-<solo si se encontró documentación relevante>
-
-## Qué pasó
-<qué hacía la persona y qué ocurrió>
+## Descripción del error
+<qué hacía la persona y qué ocurrió; precisiones de documentación marcadas con "Según la documentación,">
 
 ## Pasos para reproducir
 <solo si el analista narró los pasos>
@@ -115,12 +112,23 @@ libre:
 <solo si el analista dijo qué esperaba>
 ```
 
-`## Módulo afectado` y `## Qué pasó` están siempre presentes; las demás
-secciones se omiten por completo (encabezado y cuerpo) cuando el
-analista no mencionó esa información o no se encontró documentación
-relevante — nunca se rellenan con texto genérico tipo "no
-especificado". Todo el texto de los prompts vive en `prompts.py` (ver
-`CLAUDE.md` "Prompt repository convention").
+`## Módulo afectado` y `## Descripción del error` están siempre
+presentes; las demás secciones se omiten por completo (encabezado y
+cuerpo) cuando el analista no mencionó esa información — nunca se
+rellenan con texto genérico tipo "no especificado".
+
+No hay una sección aparte de "Contexto del módulo": las precisiones que
+aporta la documentación recuperada van integradas en `## Descripción del
+error`, siempre marcadas explícitamente con "Según la documentación," al
+inicio de la oración — esa marca es la frontera que evita confundir lo
+que dijo el analista con lo que agrega la documentación (ver `CLAUDE.md`
+"Anti-hallucination check decision"). El nombre de módulo/submódulo se
+verifica aparte (`_verificar_modulo_afectado`): si no tiene base real en
+la transcripción o el contexto, cae a "Módulo afectado: no
+identificado" en vez de inventar un nombre.
+
+Todo el texto de los prompts vive en `prompts.py` (ver `CLAUDE.md`
+"Prompt repository convention").
 
 `consultar_documentacion.py` (modo "Consultar documentación") responde
 en lenguaje llano, no técnico, y distingue tres estados: una respuesta
