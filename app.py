@@ -153,19 +153,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <p class="bob-eyebrow">Asistente de voz para analistas</p>
-    <p class="bob-title">Del audio a la descripción,
-        <span class="bob-title-accent">lista para Jira</span></p>
-    <p class="bob-subtitle">
-        El audio se transcribe y, según el modo elegido, arma una
-        descripción lista para Jira o responde una consulta usando la
-        documentación disponible — sin necesidad de escribir nada a mano.
-    </p>
-    """,
-    unsafe_allow_html=True,
-)
+columna_mascota, columna_titulo = st.columns([1, 4], vertical_alignment="center")
+with columna_mascota:
+    st.image("assets/bob_mascota.png")
+with columna_titulo:
+    st.markdown(
+        """
+        <p class="bob-eyebrow">Asistente de voz para analistas</p>
+        <p class="bob-title">Del audio a la descripción,
+            <span class="bob-title-accent">lista para Jira</span></p>
+        <p class="bob-subtitle">
+            El audio se transcribe y, según el modo elegido, arma una
+            descripción lista para Jira o responde una consulta usando la
+            documentación disponible — sin necesidad de escribir nada a mano.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
 if "transcripcion" not in st.session_state:
     st.session_state.transcripcion = ""
