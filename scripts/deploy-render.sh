@@ -56,7 +56,7 @@ git clean -fd memory/
 trap - EXIT
 
 echo "Redeployando en Render..."
-render deploys create "$SERVICIO_RENDER" --wait
+render deploys create "$SERVICIO_RENDER" --confirm --wait
 
 echo
 echo "Listo — https://bob-vjwv.onrender.com"

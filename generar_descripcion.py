@@ -147,10 +147,17 @@ def _verificar_resultado_esperado(transcripcion: str, cuerpo: str, cliente) -> b
         return True
 
 
-def _verificar_modulo_afectado(fuente: str, modulo: str, cliente) -> bool:
-    """Ask Claude Haiku 4.5 whether `modulo` is a literal quote (module/
-    screen/functionality name) from `fuente` (transcript + retrieved
-    context), or an invented/paraphrased name nobody actually used.
+def _verificar_modulo_afectado(transcripcion: str, contexto: str, modulo: str, cliente) -> bool:
+    """Ask Claude Haiku 4.5 whether `modulo` (module/screen/option name,
+    possibly multi-level) is grounded in `transcripcion` OR `contexto`
+    independently — either source alone is sufficient for a given level, or
+    an invented level nobody actually said/documented.
+
+    `transcripcion` and `contexto` are passed SEPARATELY (not concatenated)
+    so the verifier can't conflate "the analyst said it" with "only the
+    documentation says it" — a real bug: a name whose every level was
+    literally in the transcript ("Indicadores > Configuración > Metas") was
+    still rejected because the technical docs didn't use those words.
 
     Defaults to True (assume grounded, keep the text) on any failure — same
     fail-open policy as `_verificar_resultado_esperado`. Never raises.
@@ -162,8 +169,10 @@ def _verificar_modulo_afectado(fuente: str, modulo: str, cliente) -> bool:
             cliente,
             model=MODELO_AUXILIAR,
             system=VERIFICADOR_MODULO_AFECTADO,
-            mensaje_usuario=ENTRADA_VERIFICADOR_MODULO_AFECTADO.format(fuente=fuente, modulo=modulo),
-            max_tokens=150,
+            mensaje_usuario=ENTRADA_VERIFICADOR_MODULO_AFECTADO.format(
+                transcripcion=transcripcion, contexto=contexto, modulo=modulo
+            ),
+            max_tokens=200,
         )
         return bool(datos.get("fundamentado", True))
     except Exception as exc:
@@ -215,8 +224,7 @@ def postprocesar_descripcion(texto: str, transcripcion: str, cliente, contexto: 
             i_modulo, fin_modulo = ubicacion_modulo
             cuerpo_modulo = "\n".join(lineas[i_modulo + 1 : fin_modulo]).strip()
             if cuerpo_modulo and cuerpo_modulo != MODULO_NO_IDENTIFICADO:
-                fuente = f"{transcripcion}\n{contexto}"
-                if not _verificar_modulo_afectado(fuente, cuerpo_modulo, cliente):
+                if not _verificar_modulo_afectado(transcripcion, contexto, cuerpo_modulo, cliente):
                     lineas = _reemplazar_cuerpo(lineas, i_modulo, fin_modulo, MODULO_NO_IDENTIFICADO)
                     resultado = "\n".join(lineas)
 

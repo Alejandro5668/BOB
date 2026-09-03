@@ -277,9 +277,21 @@ def test_rule_12_no_fence_no_preamble_wording():
     assert "SIN envolverla en un bloque de código" in GENERADOR_DESCRIPCION_TICKET
 
 
-def test_context_rules_13_to_19_only_in_con_contexto_prompt():
-    assert "Módulo > Submódulo" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
-    assert "Módulo > Submódulo" not in GENERADOR_DESCRIPCION_TICKET
+def test_context_rules_14_to_20_only_in_con_contexto_prompt():
+    assert "ruta completa de navegación" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert "ruta completa de navegación" not in GENERADOR_DESCRIPCION_TICKET
+
+
+def test_rule_15_module_path_not_capped_at_two_levels():
+    """Regression: a real 3-level case ("módulo de riesgos" > opción
+    "Administración de riesgos" > "mapa térmico") lost its middle level
+    because rule 14 (now 15) originally hardcoded exactly "Módulo >
+    Submódulo". Fixed to allow as many levels as the analyst narrated."""
+    assert "no un tope fijo de dos niveles" in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    assert (
+        "eso NO significa tres módulos distintos"
+        in GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
+    )
 
 
 def test_rule_15_allows_context_precision_inline_marked_in_descripcion_error():
@@ -346,7 +358,7 @@ def test_synthetic_submodule_context_reaches_user_message_verbatim(monkeypatch):
     user_msg = kwargs["messages"][0]["content"]
 
     assert system_msg == GENERADOR_DESCRIPCION_TICKET_CON_CONTEXTO
-    assert "Módulo > Submódulo" in system_msg
+    assert "ruta completa de navegación" in system_msg
     assert user_msg == ENTRADA_GENERADOR_DESCRIPCION_CON_CONTEXTO.format(
         contexto=CONTEXTO_SUBMODULO_SINTETICO, transcripcion=transcripcion
     )
