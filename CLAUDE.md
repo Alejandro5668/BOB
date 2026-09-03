@@ -395,8 +395,29 @@ GitHub Actions CI configured for this repo yet.
 
 ## Deploying after a merge
 
-<PLACEHOLDER: no deploy pipeline yet — describe it here once one exists
-(auto-deploy on push? manual script? which environments?).>
+Production runs on Render (image-based Web Service, no Git connection):
+`https://bob-vjwv.onrender.com`. Deliberately **not** auto-deploy-on-push —
+run `./scripts/deploy-render.sh` (with `KAWAK_DOCS_DIR` set to the real
+Kawak docs folder) whenever you want to ship a new code or docs version.
+
+**Why not auto-deploy on `git push`:** the real Kawak documentation
+(`memory/` fixture's real-world counterpart) must never be committed to
+this repo (see "Context retrieval decision"). A GitHub-connected Render
+service would build strictly from what's in git — i.e., only ever the
+3-file fixture, silently replacing the real corpus the moment auto-deploy
+fired. `deploy-render.sh` instead bakes the real docs into the Docker
+image locally (swap `memory/` → build → push → restore `memory/` from
+git, same pattern `deploy-render.sh` itself uses, always via a `trap` so a
+mid-script failure can't leave real docs sitting in the tracked working
+tree) and redeploys that exact image. One command, but a deliberate one —
+never silent, never automatic.
+
+The public deploy has **no authentication** — explicit, confirmed user
+decision (see the Fase 5 deployment conversation). Whoever has the URL can
+use BOB against the real Kawak documentation, unauthenticated, consuming
+the project's `ANTHROPIC_API_KEY`/`ELEVENLABS_API_KEY`. Revisit this
+before treating the URL as anything other than "share only with people
+you already trust with this data."
 
 ## Commits and Pull Requests
 

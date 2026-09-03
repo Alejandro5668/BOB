@@ -12,6 +12,15 @@ la API de Anthropic para generar la respuesta (decisiones explícitas,
 ver `CLAUDE.md` "Transcription provider decision" y "Migración a
 Claude Haiku 4.5").
 
+## Producción
+
+**https://bob-vjwv.onrender.com** — deploy en Render con la documentación
+real de Kawak. Sin autenticación (decisión explícita, ver `CLAUDE.md`
+"Deploying after a merge"): compartir el link solo con quien ya deba
+tener acceso a esa documentación. No hace auto-deploy en cada push —
+correr `./scripts/deploy-render.sh` para actualizar código o documentación
+(ver esa misma sección de `CLAUDE.md` para el porqué).
+
 ## Arrancar el proyecto (recomendado)
 
 ```bash
