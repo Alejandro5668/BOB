@@ -5,3 +5,5 @@ __pycache__/
 logs/
 cache/
 docker-compose.override.yml
+
+.atl/

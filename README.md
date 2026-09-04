@@ -1,170 +1,75 @@
-# BOB — Asistente de Voz para Analistas
+<p align="center">
+  <img src="assets/bob_logo.png" width="140" alt="BOB">
+</p>
 
-Aplicación Streamlit de una sola pantalla: graba un audio, lo transcribe
-con la API de ElevenLabs, permite editar la transcripción, y según el
-modo elegido genera una descripción lista para Jira o responde una
-consulta usando la documentación disponible — todo con Claude Haiku 4.5.
-La transcripción se auto-inicia al parar de grabar (sin clic extra).
+<h1 align="center">BOB</h1>
 
-**Nota de privacidad:** el audio se envía a la API de ElevenLabs para
-transcribirse, y la transcripción/documentación seleccionada se envía a
-la API de Anthropic para generar la respuesta (decisiones explícitas,
-ver `CLAUDE.md` "Transcription provider decision" y "Migración a
-Claude Haiku 4.5").
+<p align="center">
+  Asistente de voz para analistas — del audio al ticket de Jira, sin escribir nada a mano.
+</p>
 
-## Producción
+---
 
-**https://bob-vjwv.onrender.com** — deploy en Render con la documentación
-real de Kawak. Sin autenticación (decisión explícita, ver `CLAUDE.md`
-"Deploying after a merge"): compartir el link solo con quien ya deba
-tener acceso a esa documentación. No hace auto-deploy en cada push —
-correr `./scripts/deploy-render.sh` para actualizar código o documentación
-(ver esa misma sección de `CLAUDE.md` para el porqué).
+Un analista graba un audio contando un problema que le reportó un cliente
+(o haciendo una pregunta sobre cómo funciona algo). BOB lo transcribe, busca
+la documentación interna relevante, y arma con **Claude Haiku 4.5** una
+descripción lista para pegar en Jira — o responde la consulta directo — en
+lenguaje llano, sin necesidad de saber programar.
 
-## Arrancar el proyecto (recomendado)
+- 🎙️ **Voz a texto** con la API de ElevenLabs, transcripción automática al terminar de grabar.
+- 🎫 **Descripción de ticket lista para Jira**, plantilla fija (módulo afectado, qué pasó, pasos, resultado esperado) — nunca prosa libre ni relleno genérico.
+- 💬 **Modo consulta**: responde preguntas sobre cómo funciona el sistema, y pide una aclaración en vez de adivinar cuando la pregunta es ambigua.
+- 📚 **RAG sin estructura fija**: encuentra cualquier `.md` en la carpeta de documentación, sin índice ni convención de carpetas — la propia IA elige qué documentos son relevantes.
+- 🛡️ **Guardrails anti-alucinación**: cada nombre de módulo y cada precisión que viene de la documentación se verifica por separado antes de mostrarse; si no tiene base real, se descarta en vez de inventarse.
+
+## Arrancar el proyecto
+
+Si estás usando Claude Code, lo más simple es pedirle directamente:
+
+> "Levantame el proyecto"
+
+`CLAUDE.md` ya tiene la instrucción exacta, así que Claude Code corre
+`./scripts/setup.sh` por vos — reconstruye la imagen de Docker desde cero y
+levanta el contenedor, para que nunca quede sirviendo una versión vieja
+por accidente.
+
+Si preferís hacerlo vos mismo, es el mismo comando:
 
 ```bash
 ./scripts/setup.sh
 ```
 
-Idempotente — seguro correrlo de nuevo en cualquier momento, incluso
-después de un merge. Siempre reconstruye la imagen y recrea el
-contenedor desde cero, así que nunca deja sirviendo en silencio un
-build viejo. Si `.env` no existe, lo crea a partir de `.env.example` y
-avisa qué claves completar.
+Al terminar, la app queda en `http://localhost:8501`. Es seguro correr este
+script de nuevo en cualquier momento, incluso después de traer cambios
+nuevos.
 
-## Variables de entorno
+### Variables de entorno
 
-Copia `.env.example` a `.env` y completa:
+El script crea `.env` a partir de `.env.example` si todavía no existe.
+Completá:
 
-| Variable | Requerida | Descripción |
+| Variable | Requerida | Para qué |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Sí | Clave de la API de Anthropic usada por selección, generación, verificación y consulta (Claude Haiku 4.5). Sin ella, la generación y la consulta fallan con un error de configuración claro antes de cualquier llamada de red. |
-| `ELEVENLABS_API_KEY` | Sí | Clave de la API de ElevenLabs usada por `transcribir.py`. Sin ella, la transcripción falla con un error de configuración claro (`ErrorConfiguracionAudio`) antes de cualquier llamada de red. |
-| `MEMORY_DIR` | No | Ruta a una carpeta de documentación cualquiera (ver `memory/` abajo). Por defecto `./memory`. Si no existe o no es legible, la app degrada de forma automática: la generación sigue funcionando solo con la transcripción y se muestra un aviso no bloqueante (`st.info`). |
-| `BOB_HOST_PORT` | No | Puerto publicado en el host (Docker), por defecto `8501`. Útil si `8501` ya está ocupado por otro proceso o contenedor. |
+| `ANTHROPIC_API_KEY` | Sí | Selección de documentos, generación, verificación y modo consulta (Claude Haiku 4.5). |
+| `ELEVENLABS_API_KEY` | Sí | Transcripción de audio a texto. |
+| `MEMORY_DIR` | No | Carpeta con la documentación real a usar como contexto. Sin ella, se usa el fixture de ejemplo incluido en `memory/`. |
 
-`.env` es opcional para Docker: si no existe, `docker compose up` funciona
-igual (`env_file` con `required: false`).
+## Cómo funciona por dentro
 
-## Ejecutar manualmente (sin el script)
+- `contexto_memoria.py` — encuentra los `.md` disponibles y le pregunta a
+  Haiku cuáles son relevantes para el caso, sin scoring propio ni
+  estructura de carpetas fija.
+- `generar_descripcion.py` / `consultar_documentacion.py` — arman la
+  respuesta con la plantilla fija y la pasan por los verificadores
+  anti-alucinación antes de mostrarla.
+- `cliente_anthropic.py` — el único punto de contacto con la API de
+  Anthropic (cliente, reintentos, helper de JSON).
+- `prompts.py` — todos los prompts del proyecto, centralizados y
+  documentados ahí, nunca inline en el código que los usa.
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Ejecutar con Docker manualmente
-
-```bash
-docker compose up --build
-```
-
-Para detener:
-
-```bash
-docker compose down
-```
-
-La imagen no incluye ningún modelo horneado — tanto la transcripción
-(ElevenLabs) como la generación (Anthropic) necesitan salida a internet
-desde el primer uso.
-
-### Usar documentación real en producción
-
-Por defecto la imagen usa el `memory/` fixture versionado en el repo.
-Para apuntar a cualquier carpeta de documentación real en solo lectura,
-agrega un override en `docker-compose.yml` (o un
-`docker-compose.override.yml`, gitignored):
-
-```yaml
-services:
-  app:
-    volumes:
-      - /ruta/al/memory/real:/app/memory_real:ro
-    environment:
-      MEMORY_DIR: /app/memory_real
-```
-
-### Seguridad
-
-El puerto publicado no tiene autenticación. Este empaquetado está
-pensado para `localhost` o una red interna de confianza; un proxy
-reverso con autenticación queda como opción futura, fuera de alcance
-de esta fase.
-
-## Generación (ticket y consulta)
-
-`generar_descripcion.py` devuelve una plantilla Markdown fija, no prosa
-libre:
-
-```markdown
-## Módulo afectado
-<módulo detectado, formato "Módulo > Submódulo" si aplica, o "Módulo afectado: no identificado">
-
-## Descripción del error
-<qué hacía la persona y qué ocurrió; precisiones de documentación marcadas con "Según la documentación,">
-
-## Pasos para reproducir
-<solo si el analista narró los pasos>
-
-## Resultado esperado vs. obtenido
-<solo si el analista dijo qué esperaba>
-```
-
-`## Módulo afectado` y `## Descripción del error` están siempre
-presentes; las demás secciones se omiten por completo (encabezado y
-cuerpo) cuando el analista no mencionó esa información — nunca se
-rellenan con texto genérico tipo "no especificado".
-
-No hay una sección aparte de "Contexto del módulo": las precisiones que
-aporta la documentación recuperada van integradas en `## Descripción del
-error`, siempre marcadas explícitamente con "Según la documentación," al
-inicio de la oración — esa marca es la frontera que evita confundir lo
-que dijo el analista con lo que agrega la documentación (ver `CLAUDE.md`
-"Anti-hallucination check decision"). El nombre de módulo/submódulo se
-verifica aparte (`_verificar_modulo_afectado`): si no tiene base real en
-la transcripción o el contexto, cae a "Módulo afectado: no
-identificado" en vez de inventar un nombre.
-
-Todo el texto de los prompts vive en `prompts.py` (ver `CLAUDE.md`
-"Prompt repository convention").
-
-`consultar_documentacion.py` (modo "Consultar documentación") responde
-en lenguaje llano, no técnico, y distingue tres estados: una respuesta
-directa, una pregunta aclaratoria (cuando la consulta es ambigua o
-falta contexto para responder con confianza), o el aviso fijo de "sin
-información" (cuando no se encontró documentación relacionada).
-
-## `memory/` — contexto de documentación (sin estructura fija)
-
-`contexto_memoria.py` encuentra **cualquier archivo `.md`** bajo
-`MEMORY_DIR`, sin importar su nombre o en qué subcarpeta esté — no
-requiere ningún índice ni convención de carpetas particular. Puede
-apuntarse a la documentación real de cualquier proyecto, tal cual está.
-
-En vez de un algoritmo de coincidencia de texto propio, la selección de
-qué documentos son relevantes para una transcripción la hace **Claude
-Haiku 4.5 mismo**: se le manda la transcripción más una lista liviana
-(ruta + vista previa breve) de los documentos disponibles, y el modelo
-elige cuáles (como máximo 3) conviene inyectar — completos, no
-resumidos — como contexto para la generación. Es de **solo lectura**:
-la app nunca escribe, crea ni borra nada bajo `MEMORY_DIR`.
-
-Para carpetas grandes, la lista se envía en lotes acotados en tamaño
-(`CARACTERES_POR_LOTE`), no todo de una vez, y se re-evalúa entre lotes
-para no perder el mejor candidato — verificado contra la documentación
-real de Kawak PHP (273 archivos).
-
-La carpeta `memory/` versionada en este repo es un **fixture de
-desarrollo/pruebas** (tres documentos de ejemplo:
-`gestion_riesgos.md`, `planes_accion.md`, `auditorias_internas.md`, sin
-ninguna estructura especial). En un entorno real, `MEMORY_DIR` debe
-apuntar a la carpeta de documentación real del proyecto — no se
-versiona ni se sube al repo.
-
-Ver `CLAUDE.md` "Context retrieval decision" y "Migración a Claude
-Haiku 4.5" para el detalle de las decisiones de arquitectura.
+El detalle completo de cada decisión de arquitectura (por qué RAG sin
+estructura fija, por qué los guardrails funcionan así, cómo se despliega)
+está en `CLAUDE.md`.
 
 ## Tests
 
@@ -172,7 +77,5 @@ Haiku 4.5" para el detalle de las decisiones de arquitectura.
 pytest
 ```
 
-Cubre `transcribir.py`, `generar_descripcion.py`, `contexto_memoria.py`,
-`consultar_documentacion.py` y `cliente_anthropic.py` con
-clientes/proveedores falsos — sin llamadas de red, sin
-`ELEVENLABS_API_KEY` ni `ANTHROPIC_API_KEY` requeridas.
+Sin llamadas de red — todo corre contra clientes falsos, no hace falta
+ninguna clave de API para que pasen.
