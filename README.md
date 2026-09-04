@@ -24,16 +24,16 @@ lenguaje llano, sin necesidad de saber programar.
 
 ## Arrancar el proyecto
 
-Si estás usando Claude Code, lo más simple es pedirle directamente:
+Si se está usando Claude Code, lo más simple es pedirle directamente:
 
-> "Levantame el proyecto"
+> "Levanta el proyecto"
 
-`CLAUDE.md` ya tiene la instrucción exacta, así que Claude Code corre
-`./scripts/setup.sh` por vos — reconstruye la imagen de Docker desde cero y
-levanta el contenedor, para que nunca quede sirviendo una versión vieja
-por accidente.
+`CLAUDE.md` ya tiene la instrucción exacta, así que Claude Code ejecuta
+`./scripts/setup.sh` automáticamente — reconstruye la imagen de Docker
+desde cero y levanta el contenedor, para que nunca quede sirviendo una
+versión vieja por accidente.
 
-Si preferís hacerlo vos mismo, es el mismo comando:
+Para hacerlo manualmente, el comando es el mismo:
 
 ```bash
 ./scripts/setup.sh
@@ -46,7 +46,7 @@ nuevos.
 ### Variables de entorno
 
 El script crea `.env` a partir de `.env.example` si todavía no existe.
-Completá:
+Completar:
 
 | Variable | Requerida | Para qué |
 |---|---|---|
